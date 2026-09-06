@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# 日志
+logs/
+*.log
+
+# 临时文件
+*.tmp
+.DS_Store
+Thumbs.db
