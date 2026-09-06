@@ -26,8 +26,10 @@ class TempLogger:
 
     @staticmethod
     def _logBaseDir() -> str:
-        # PyInstaller 打包后取 exe 目录；源码运行取 src/ 目录
-        if hasattr(sys, "_MEIPASS") or sys.argv[0].lower().endswith(".exe"):
+        # 打包后取真实 exe 目录（sys.argv[0] 会指向 _MEI 临时目录，导致日志写到临时目录）
+        if getattr(sys, "frozen", False):
+            base = os.path.dirname(sys.executable)
+        elif sys.argv[0].lower().endswith(".exe"):
             base = os.path.dirname(os.path.abspath(sys.argv[0]))
         else:
             base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # src/ 的上级

@@ -22,6 +22,18 @@ GUI_ICON_FALLBACK = 'icons/gaugeIcon.png'
 def resourcePath(relativePath: str = '.'):
     return os.path.join(sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.abspath('.'), relativePath)
 
+def appExePath() -> str:
+    """返回当前运行的真实可执行文件路径。
+
+    PyInstaller --onefile 打包后，sys.argv[0] 会被替换为 _MEIxxxx 临时解压目录
+    （每次启动随机变化），而 sys.executable 才是用户安装/放置的那个 exe。
+    用 argv[0] 会导致：开机自启 Run 键指向一个每次都在变的临时路径、CSV 日志
+    写到临时目录等 bug。故打包状态下统一取 sys.executable。
+    """
+    if getattr(sys, 'frozen', False):
+        return sys.executable
+    return os.path.abspath(sys.argv[0])
+
 def appIcon() -> QtGui.QIcon:
     """返回应用图标。优先用新 ico，找不到（资源未打包/路径不符）则回退 png 或 exe 内嵌图标。"""
     p = resourcePath(GUI_ICON)
@@ -33,27 +45,46 @@ def appIcon() -> QtGui.QIcon:
     return QtGui.QIcon()
 
 def autorunTask(action: Literal['add', 'remove']) -> int:
-    taskXmlFilePath = resourcePath("tcc_g15_task.xml")
+    """开机自启：写入/删除注册表 HKCU\\...\\Run 键。
 
-    addCmd = f'schtasks /create /xml "{taskXmlFilePath}" /tn "TCC_G15"'
-    removeCmd = 'schtasks /delete /tn "TCC_G15" /f'
+    改为注册表方案（替代原 schtasks+xml），原因：
+    1. 原方案依赖外部 tcc_g15_task.xml，便携版打包时容易漏掉；
+    2. xml 方案需在运行时改写临时目录（sys._MEIPASS 只读），打包后必然失败；
+    3. 注册表 Run 键无需外部文件、无需管理员权限（HKCU）、对便携版最可靠。
+    """
+    RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    VALUE_NAME = "TCC_G15"
+    exeFile = appExePath()
 
-    if action == 'add':
-        # Patch program path in the xml file
-        exeFile = os.path.abspath(sys.argv[0])
-        if exeFile.endswith('.exe'):
-            with open(taskXmlFilePath, 'r') as f:
-                xml = f.read()
-            xml = xml.replace('<!--EXE_FILE_PATH-->', exeFile)
-            with open(taskXmlFilePath, 'w') as f:
-                f.write(xml)
+    try:
+        import winreg
+    except ImportError:
+        return -1
+
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
+                             winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
+    except OSError:
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
+        except OSError:
+            return -2
+
+    try:
+        if action == 'add':
+            if not exeFile.lower().endswith('.exe'):
+                return -100
+            # 用引号包裹路径，防止路径含空格时失效；--minimized 启动后最小化到托盘
+            cmd = f'"{exeFile}" --minimized'
+            winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, cmd)
         else:
-            return -100
-
-        os.system(removeCmd)
-        return os.system(addCmd)
-    else:
-        return os.system(removeCmd)
+            try:
+                winreg.DeleteValue(key, VALUE_NAME)
+            except FileNotFoundError:
+                pass  # 本来就没有，忽略
+        return 0
+    finally:
+        winreg.CloseKey(key)
 
 def alert(title: str, message: str, type: QtWidgets.QMessageBox.Icon = QtWidgets.QMessageBox.Icon.Information, *, message2: Optional[str] = None) -> None:
     msg = QtWidgets.QMessageBox(type, title, message)

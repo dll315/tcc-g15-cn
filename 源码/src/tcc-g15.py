@@ -9,8 +9,12 @@ def createAppLockFile():
     # works for windows only
     import tempfile
     import os
+    exe = os.path.abspath(sys.argv[0])
+    # 打包状态下取真实 exe（sys.argv[0] 会指向 _MEI 临时目录，导致锁文件不固定）
+    if getattr(sys, 'frozen', False):
+        exe = sys.executable
     basename = (
-        os.path.splitext(os.path.abspath(sys.argv[0]))[0]
+        os.path.splitext(exe)[0]
             .replace("/", "-").replace(":", "").replace("\\", "-")
             + ".lock"
     )
