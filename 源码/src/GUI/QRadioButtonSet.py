@@ -27,6 +27,9 @@ class QRadioButtonSet(QtWidgets.QWidget):
             rb.toggled.connect(self._onClicked)
 
     def setChecked(self, value: str):
+        if value not in self._buttons:
+            # 防御：非法值（如原版/旧版残留的未知模式）直接忽略，避免 KeyError 崩溃
+            return
         self._buttons[value].setChecked(True)
 
     def getChecked(self) -> Optional[str]:

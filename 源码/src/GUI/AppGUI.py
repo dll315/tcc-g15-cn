@@ -167,6 +167,8 @@ class TCC_GUI(QtWidgets.QWidget):
     APP_VERSION = "1.7.0-cn"
     APP_DESCRIPTION = "Alienware Command Center 的开源替代品（中文改造版）"
     APP_URL = "github.com/AlexIII/tcc-g15"
+    # 设置存储隔离：必须与原作者不同，否则改造版的 'Auto' 模式会污染原版设置、导致原版崩溃
+    SETTINGS_ORG = "github.com/dll315/tcc-g15-cn"
 
     # Green to Yellow and Yellow to Red thresholds
     GPU_COLOR_LIMITS = (72, 85)
@@ -192,7 +194,7 @@ class TCC_GUI(QtWidgets.QWidget):
         super().__init__()
         self._awcc = awcc
 
-        self.settings = QtCore.QSettings(self.APP_URL, "AWCC")
+        self.settings = QtCore.QSettings(self.SETTINGS_ORG, "AWCC")
         print(f'Settings location: {self.settings.fileName()}')
 
         # Set main window props
@@ -281,17 +283,17 @@ class TCC_GUI(QtWidgets.QWidget):
         restoreAction.triggered.connect(self.clearAppSettings)
         exitAction = menu.addAction("退出")
         exitAction.triggered.connect(self.onExit)
-        # Setup tray widget
-        tray = QtWidgets.QSystemTrayIcon(self)
-        tray.setIcon(self.trayIcon)
-        tray.setContextMenu(menu)
-        tray.show()
+        # Setup tray widget（存为实例属性，防止被 GC 回收导致最小化后无托盘）
+        self.tray = QtWidgets.QSystemTrayIcon(self)
+        self.tray.setIcon(self.trayIcon)
+        self.tray.setContextMenu(menu)
+        self.tray.show()
 
         def onTrayIconActivated(trigger):
             if trigger == QtWidgets.QSystemTrayIcon.ActivationReason.DoubleClick:
                 self.showNormal()
                 self.activateWindow()
-        self.connect(tray, QtCore.SIGNAL("activated(QSystemTrayIcon::ActivationReason)"), onTrayIconActivated)
+        self.connect(self.tray, QtCore.SIGNAL("activated(QSystemTrayIcon::ActivationReason)"), onTrayIconActivated)
 
         # Set up GUI
         self.setObjectName('QMainWindow')
@@ -514,8 +516,8 @@ class TCC_GUI(QtWidgets.QWidget):
             # Update tray icon
             self.trayIcon = self.trayIcon.resizeForScreen() or self.trayIcon
             self.trayIcon.update((gpuTemp, cpuTemp), self._modeSwitch.getChecked() == ThermalMode.G_Mode.value)
-            tray.setIcon(self.trayIcon)
-            tray.setToolTip(f"GPU：{gpuTemp} °C，{gpuRPM} 转/分\nCPU：{cpuTemp} °C，{cpuRPM} 转/分\n模式：{modeDisplayName(self._modeSwitch.getChecked())}")
+            self.tray.setIcon(self.trayIcon)
+            self.tray.setToolTip(f"GPU：{gpuTemp} °C，{gpuRPM} 转/分\nCPU：{cpuTemp} °C，{cpuRPM} 转/分\n模式：{modeDisplayName(self._modeSwitch.getChecked())}")
 
             # Periodically save app settings
             self._saveAppSettings()
@@ -642,6 +644,10 @@ class TCC_GUI(QtWidgets.QWidget):
 
     def _loadAppSettings(self):
         savedMode = self.settings.value(SettingsKey.Mode.value) or ThermalMode.Balanced.value
+        # 合法性校验：若读到未知模式（如旧版本残留脏数据），回退到 Balanced，防止 setChecked 崩溃
+        validModes = [m.value for m in ThermalMode]
+        if savedMode not in validModes:
+            savedMode = ThermalMode.Balanced.value
         self._modeSwitch.setChecked(savedMode)
         savedSpeed = self.settings.value(SettingsKey.CPUFanSpeed.value)
         self._thermalCPU.setSpeedSlider(savedSpeed)
@@ -668,6 +674,8 @@ class TCC_GUI(QtWidgets.QWidget):
 
 def runApp(startMinimized = False) -> int:
     app = QtWidgets.QApplication([])
+    # 关键：关闭/隐藏最后窗口时不要退出程序（保持托盘运行），否则 --minimized 启动后 hide() 会直接退出
+    app.setQuitOnLastWindowClosed(False)
 
     # Setup backend
     try:
@@ -803,7 +811,7 @@ def runApp(startMinimized = False) -> int:
     """)
 
     if startMinimized:
-        mainWindow.showMinimized()
+        # 开机自启：不显示主窗口，直接驻留托盘（配合 setQuitOnLastWindowClosed(False) 不会退出）
         mainWindow.hide()
     else:
         mainWindow.show()
