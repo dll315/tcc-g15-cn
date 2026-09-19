@@ -139,8 +139,6 @@ def autorunTask(action: Literal['add', 'remove']) -> int:
     import subprocess
     import tempfile
 
-    cleanupLegacyRunEntry()
-
     if action == 'add':
         exeFile = appExePath()
         if not exeFile.lower().endswith('.exe'):
@@ -168,7 +166,11 @@ def autorunTask(action: Literal['add', 'remove']) -> int:
         print(f'schtasks {action} failed: {res.stdout} {res.stderr}')
         # 删除一个本就不存在的任务，schtasks 也返回非 0，这种"失败"要当成功
         if action == 'remove' and ('找不到' in (res.stderr + res.stdout) or 'cannot find' in (res.stderr + res.stdout).lower()):
+            cleanupLegacyRunEntry()
             return 0
+    else:
+        # 只有任务真的处理成功才清旧 Run 值：否则建任务失败 + 旧项被删 = 自启彻底失效
+        cleanupLegacyRunEntry()
     return res.returncode
 
 def alert(title: str, message: str, type: QtWidgets.QMessageBox.Icon = QtWidgets.QMessageBox.Icon.Information, *, message2: Optional[str] = None) -> None:

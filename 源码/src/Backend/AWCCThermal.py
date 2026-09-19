@@ -50,7 +50,10 @@ class AWCCThermal:
     def getFanRelatedTemp(self, fanIdx: int) -> Optional[int]:
         if fanIdx >= len(self._fanIdsAndRelatedSensorsIds):
             return None
-        return self._awcc.GetSensorTemperature(self._fanIdsAndRelatedSensorsIds[fanIdx][1][0])
+        sensors = self._fanIdsAndRelatedSensorsIds[fanIdx][1]
+        if not sensors:     # 探测到风扇但一个关联传感器都没读到，空元组取下标会炸掉每秒刷新
+            return None
+        return self._awcc.GetSensorTemperature(sensors[0])
 
     def getFanRPM(self, fanIdx: int) -> Optional[int]:
         if fanIdx >= len(self._fanIdsAndRelatedSensorsIds):
