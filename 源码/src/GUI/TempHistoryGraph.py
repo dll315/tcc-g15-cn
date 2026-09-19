@@ -2,8 +2,10 @@
 # 温度历史曲线组件：QPainter 自绘，显示最近 N 个采样点的 GPU / CPU 温度走势
 
 import collections
-from typing import Optional
+from typing import Optional, Tuple
 from PySide6 import QtCore, QtGui, QtWidgets
+
+from GUI.AppColors import Colors
 
 
 class TempHistoryGraph(QtWidgets.QWidget):
@@ -31,12 +33,14 @@ class TempHistoryGraph(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setToolTip("温度走势（最近 5 分钟）")
 
-        self._colorGpu = QtGui.QColor("#34d17d")   # GPU 绿
-        self._colorCpu = QtGui.QColor("#4da3ff")   # CPU 蓝
+        self._colorGpu = QtGui.QColor(Colors.GREEN.value)      # GPU 绿
+        self._colorCpu = QtGui.QColor(Colors.BLUE.value)       # CPU 蓝
         self._colorGrid = QtGui.QColor(255, 255, 255, 26)
-        self._colorText = QtGui.QColor("#9aa4b2")
-        self._colorFillGpu = QtGui.QColor(52, 209, 125, 46)
-        self._colorFillCpu = QtGui.QColor(77, 163, 255, 46)
+        self._colorText = QtGui.QColor(Colors.TEXT_DIM.value)
+        self._colorFillGpu = QtGui.QColor(self._colorGpu)
+        self._colorFillGpu.setAlpha(46)
+        self._colorFillCpu = QtGui.QColor(self._colorCpu)
+        self._colorFillCpu.setAlpha(46)
 
     # ---------- 数据接口 ----------
 
@@ -46,14 +50,21 @@ class TempHistoryGraph(QtWidgets.QWidget):
         self._cpuData.append(cpuTemp)
         self.update()
 
-    def clear(self) -> None:
-        self._gpuData.clear()
-        self._cpuData.clear()
-        self.update()
-
     # ---------- 绘制 ----------
 
-    def _iterPolyline(self, data) -> Optional[QtGui.QPolygonF]:
+    def _yRange(self) -> Tuple[int, int]:
+        """纵轴范围由两条曲线共同决定。各画各的标度会让同屏的两条线不可比，
+        而且刻度文字是按合并范围算的，两边都不对应。"""
+        valid = [v for v in tuple(self._gpuData) + tuple(self._cpuData) if v is not None]
+        if not valid:
+            return self._yMin, self._yMax
+        lo, hi = min(valid) - 5, max(valid) + 5
+        if hi - lo < 30:                      # 数据太平也拉开 30°C，免得画成一条直线
+            mid = (lo + hi) / 2
+            lo, hi = mid - 15, mid + 15
+        return max(self._yMin, int(lo)), min(self._yMax, int(hi))
+
+    def _iterPolyline(self, data, lo: int, hi: int) -> Optional[QtGui.QPolygonF]:
         """把采样点序列转换为坐标折线。数据不足 2 点时返回 None。"""
         if len(data) < 2:
             return None
@@ -64,15 +75,6 @@ class TempHistoryGraph(QtWidgets.QWidget):
         plotH = h - topPad - bottomPad
         if plotH <= 0 or w <= 0:
             return None
-
-        yMin, yMax = self._yMin, self._yMax
-        # 数据驱动的纵轴：留 5°C 余量并至少显示 30°C 区间
-        valid = [v for v in data if v is not None]
-        if valid:
-            lo = max(yMin, min(valid) - 5)
-            hi = max(yMax, max(valid) + 5) if max(valid) + 5 - lo >= 30 else lo + 30
-        else:
-            lo, hi = yMin, yMax
         span = max(1, hi - lo)
 
         poly = QtGui.QPolygonF()
@@ -95,7 +97,7 @@ class TempHistoryGraph(QtWidgets.QWidget):
         w, h = self.width(), self.height()
 
         # 背景
-        painter.fillRect(0, 0, w, h, QtGui.QColor("#1b2330"))
+        painter.fillRect(0, 0, w, h, QtGui.QColor(Colors.DARK_GREY.value))
 
         # 水平网格线 + 刻度文字
         painter.setPen(self._colorGrid)
@@ -106,25 +108,22 @@ class TempHistoryGraph(QtWidgets.QWidget):
         for i in range(5):
             y = topPad + plotH * i / 4
             painter.drawLine(0, int(y), w, int(y))
-        # 纵轴刻度（按当前数据范围）
-        valid = [v for v in list(self._gpuData) + list(self._cpuData) if v is not None]
-        if valid:
-            lo = max(self._yMin, min(valid) - 5)
-            hi = max(self._yMax, max(valid) + 5) if max(valid) + 5 - lo >= 30 else lo + 30
-            span = max(1, hi - lo)
-            painter.setPen(QtGui.QPen(self._colorText))
-            for i in range(5):
-                y = topPad + plotH * i / 4
-                t = hi - span * i / 4
-                painter.drawText(QtCore.QRectF(w - 34, y - 7, 32, 14),
-                                 QtCore.Qt.AlignRight, f"{t:.0f}°")
+        # 纵轴刻度：与两条曲线用同一套 lo/hi
+        lo, hi = self._yRange()
+        span = max(1, hi - lo)
+        painter.setPen(QtGui.QPen(self._colorText))
+        for i in range(5):
+            y = topPad + plotH * i / 4
+            t = hi - span * i / 4
+            painter.drawText(QtCore.QRectF(w - 34, y - 7, 32, 14),
+                             QtCore.Qt.AlignRight, f"{t:.0f}°")
 
         # 曲线（先画填充再画描边）
         for data, colorLine, colorFill in (
             (self._gpuData, self._colorGpu, self._colorFillGpu),
             (self._cpuData, self._colorCpu, self._colorFillCpu),
         ):
-            poly = self._iterPolyline(data)
+            poly = self._iterPolyline(data, lo, hi)
             if poly is None:
                 continue
             # 渐变填充
@@ -149,7 +148,6 @@ class TempHistoryGraph(QtWidgets.QWidget):
 
         # 图例（左上角）
         painter.setPen(QtCore.Qt.NoPen)
-        lg = [("", self._colorGpu, None, None), ("", self._colorCpu, None, None)]
         # 取当前最新值显示
         gpuCur = next((v for v in reversed(list(self._gpuData)) if v is not None), None)
         cpuCur = next((v for v in reversed(list(self._cpuData)) if v is not None), None)

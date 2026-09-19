@@ -14,13 +14,17 @@ class QGaugeTrayIcon(QtGui.QPixmap):
             return None
         return QGaugeTrayIcon(self._tempColorLimits)
 
-    def update(self, temps: Tuple[int, int], stars: bool = False) -> None:
+    def update(self, temps: Tuple[Optional[int], Optional[int]], stars: bool = False) -> None:
         self.fill(QtCore.Qt.transparent)
         painter = QtGui.QPainter(self)
         font = QtGui.QFont("Consolas", self._SIZE[1] // 2)
         painter.setFont(font)
 
-        def drawVal(y: int, val: int, limits: Optional[Tuple[int,int]]):
+        def drawVal(y: int, val: Optional[int], limits: Optional[Tuple[int,int]]):
+            if val is None:   # 传感器失联：画占位符。这里抛异常会带走整轮刷新（含设置保存）
+                painter.setPen(QtGui.QColor.fromRgb(*Colors.TEXT_DIM.rgb()))
+                painter.drawText(-1 if self._SIZE[0] > 16 else 0, y, '--')
+                return
             color = Colors.GREEN
             if limits:
                 if val >= limits[1]: color = Colors.RED

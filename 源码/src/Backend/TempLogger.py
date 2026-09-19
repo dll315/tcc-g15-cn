@@ -29,10 +29,8 @@ class TempLogger:
         # 打包后取真实 exe 目录（sys.argv[0] 会指向 _MEI 临时目录，导致日志写到临时目录）
         if getattr(sys, "frozen", False):
             base = os.path.dirname(sys.executable)
-        elif sys.argv[0].lower().endswith(".exe"):
-            base = os.path.dirname(os.path.abspath(sys.argv[0]))
         else:
-            base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # src/ 的上级
+            base = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # 源码/
         return os.path.join(base, "logs")
 
     @property
@@ -72,6 +70,8 @@ class TempLogger:
             return
         if self._file is not None:
             self._file.close()
+        # 建目录放在这里而不是 _open 里：构造时带 enabled=True（读档恢复）不会走 _open
+        os.makedirs(self._baseDir, exist_ok=True)
         path = os.path.join(self._baseDir, f"temp_log_{today}.csv")
         fileExists = os.path.exists(path)
         self._file = open(path, "a", newline="", encoding="utf-8-sig")

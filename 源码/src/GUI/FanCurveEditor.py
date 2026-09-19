@@ -44,12 +44,12 @@ class FanCurveEditor(QtWidgets.QWidget):
         self.setMouseTracking(True)
         self.setToolTip("拖动圆点调整曲线；双击空白处加点，双击圆点删点")
 
-        # 配色
-        self._colorGpu = QtGui.QColor("#34d17d")
-        self._colorCpu = QtGui.QColor("#4da3ff")
+        # 配色统一取自 AppColors
+        self._colorGpu = QtGui.QColor(Colors.GREEN.value)
+        self._colorCpu = QtGui.QColor(Colors.BLUE.value)
         self._colorGrid = QtGui.QColor(255, 255, 255, 26)
         self._colorText = QtGui.QColor(Colors.TEXT_DIM.value)
-        self._colorBg = QtGui.QColor("#141a24")
+        self._colorBg = QtGui.QColor(Colors.DARK_BG.value)
 
         # GPU / CPU 切换按钮
         self._btnGpu = QtWidgets.QPushButton("GPU", self)
@@ -58,22 +58,19 @@ class FanCurveEditor(QtWidgets.QWidget):
             b.setFixedHeight(18)
             b.setCheckable(True)
             b.setCursor(QtCore.Qt.PointingHandCursor)
-            b.setStyleSheet("""
-                QPushButton {
-                    color: #e8edf4; background: #263143;
-                    border: 1px solid #3a4556; border-radius: 4px;
+            b.setStyleSheet(f"""
+                QPushButton {{
+                    color: {Colors.WHITE.value}; background: {Colors.DARK_GREY.value};
+                    border: 1px solid {Colors.GREY.value}; border-radius: 4px;
                     padding: 0 10px; font-size: 11px;
-                }
-                QPushButton:checked { background: #4da3ff; border-color: #4da3ff; }
+                }}
+                QPushButton:checked {{ background: {Colors.BLUE.value}; border-color: {Colors.BLUE.value}; }}
             """)
         self._btnGpu.clicked.connect(lambda: self._setEditing('GPU'))
         self._btnCpu.clicked.connect(lambda: self._setEditing('CPU'))
         self._setEditing('GPU')
 
     # ---------- 对外接口 ----------
-
-    def setEnabledAnimated(self, enabled: bool) -> None:
-        self.setEnabled(enabled)
 
     def setCurrentTemps(self, gpuTemp: Optional[int], cpuTemp: Optional[int]) -> None:
         self._gpuTemp = gpuTemp
@@ -147,9 +144,7 @@ class FanCurveEditor(QtWidgets.QWidget):
         pos = e.position()
         if self._dragIdx is not None:
             self._curve().updatePoint(self._dragIdx, self._xToTemp(pos.x()), self._yToSpeed(pos.y()))
-            self.update()
-            if self._onChanged:
-                self._onChanged(self._editing)
+            self.update()     # 只重绘。回调里会写注册表并下发风扇，放这里等于一次拖动几百次 WMI 写
         else:
             idx = self._hitTest(pos)
             if idx != self._hoverIdx:
@@ -191,7 +186,7 @@ class FanCurveEditor(QtWidgets.QWidget):
 
         # 背景
         painter.fillRect(0, 0, self.width(), self.height(), self._colorBg)
-        painter.fillRect(r, QtGui.QColor("#1b2330"))
+        painter.fillRect(r, QtGui.QColor(Colors.DARK_GREY.value))
         painter.setPen(QtGui.QPen(self._colorGrid))
         painter.drawRect(r.adjusted(0, 0, -1, -1))
 
@@ -264,7 +259,7 @@ class FanCurveEditor(QtWidgets.QWidget):
             c = self._pointAt(i)
             radius = self.RADIUS_HOVER if (i == self._hoverIdx or i == self._dragIdx) else self.RADIUS
             painter.setBrush(color)
-            painter.setPen(QtGui.QPen(QtGui.QColor("#141a24"), 1.5))
+            painter.setPen(QtGui.QPen(self._colorBg, 1.5))
             painter.drawEllipse(c, radius, radius)
 
         painter.end()

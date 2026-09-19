@@ -51,16 +51,13 @@ class FanCurve:
             self._points = dedup[:self.MAX_POINTS]
 
     def updatePoint(self, index: int, temp: int, speed: int) -> bool:
-        """拖动更新一个点。违反约束（越界/与其他点过近）时返回 False，不改数据。"""
+        """拖动更新一个点。温度被钳在左右邻居各留 MIN_POINT_GAP 的区间内，
+        因此点的顺序永远不变——编辑器的 _dragIdx 在整个拖拽过程中保持有效。"""
         if not (0 <= index < len(self._points)):
             return False
-        temp = self._clampTemp(temp)
-        speed = self._clampSpeed(speed)
-        if any(abs(t - temp) < self.MIN_POINT_GAP for i, (t, _) in enumerate(self._points) if i != index):
-            return False
-        self._points[index] = (temp, speed)
-        self._points.sort(key=lambda p: p[0])
-        # 排序后索引可能变化，无妨：调用方在下一次交互前会重新取点列表
+        lo = self._points[index - 1][0] + self.MIN_POINT_GAP if index > 0 else self.TEMP_MIN
+        hi = self._points[index + 1][0] - self.MIN_POINT_GAP if index + 1 < len(self._points) else self.TEMP_MAX
+        self._points[index] = (self._clampTemp(max(lo, min(hi, temp))), self._clampSpeed(speed))
         return True
 
     def addPoint(self, temp: int, speed: int) -> bool:
