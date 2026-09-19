@@ -1,5 +1,5 @@
 from typing import Optional
-from PySide6 import QtCore, QtWidgets
+from PySide6 import QtWidgets
 
 class QGauge(QtWidgets.QProgressBar):
     _colorScheme: Optional[dict[int, str]]
@@ -8,7 +8,6 @@ class QGauge(QtWidgets.QProgressBar):
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
         super().__init__(parent)
         self.setObjectName('QGauge')
-        self._updColor_connected = False
         self._colorScheme = None
         self._extLabel = None
 

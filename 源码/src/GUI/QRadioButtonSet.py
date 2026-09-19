@@ -5,11 +5,15 @@ class QRadioButtonSet(QtWidgets.QWidget):
     _buttons: dict[str, QtWidgets.QRadioButton]
     _userCallback: Optional[Callable[[str], None]]
 
-    def __init__(self, parent: Optional[QtWidgets.QWidget], title: Optional[str], options: list[Tuple[str, str]], layout: Union[QtWidgets.QHBoxLayout, QtWidgets.QVBoxLayout] = QtWidgets.QHBoxLayout()) -> None:
+    def __init__(self, parent: Optional[QtWidgets.QWidget], title: Optional[str], options: list[Tuple[str, str]], layout: Optional[Union[QtWidgets.QHBoxLayout, QtWidgets.QVBoxLayout]] = None) -> None:
         super().__init__(parent)
         if len(options) == 0:
             raise RuntimeError('"options" list length can not be 0')
 
+        # 默认值不能直接写 QHBoxLayout()：那是在函数定义时创建的唯一对象，
+        # 第二个实例会把第一个实例的布局（连同的按钮）整个抢过去
+        if layout is None:
+            layout = QtWidgets.QHBoxLayout()
         self.setLayout(layout)
 
         if title:
