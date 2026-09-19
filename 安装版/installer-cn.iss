@@ -1,6 +1,6 @@
 ; Inno Setup 安装脚本 - TCC-G15 中文改造版
 ; 由 build.ps1 调用：iscc 安装版\installer-cn.iss
-; 路径全部相对于本脚本所在目录（{#SourceDir}），换机器换盘符也能构建
+; 路径全部相对于本脚本所在目录（Inno 默认行为），换机器换盘符也能构建
 
 #define MyAppName "TCC G15 中文版"
 #define MyAppVersion "1.7.1-cn"
@@ -19,12 +19,12 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
-LicenseFile={#SourceDir}..\源码\LICENSE
+LicenseFile=..\源码\LICENSE
 ; 程序本体需要管理员权限，但安装本身不需要：自启走提权计划任务，装在用户目录即可
 PrivilegesRequired=lowest
-OutputDir={#SourceDir}..\dist
+OutputDir=..\dist
 OutputBaseFilename="TCC-G15-cn-{#MyAppVersion}-Setup"
-SetupIconFile={#SourceDir}..\源码\icons\gaugeIcon-cn.ico
+SetupIconFile=..\源码\icons\gaugeIcon-cn.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -36,7 +36,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "{#SourceDir}..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; 两个快捷方式都要打提权位，否则从开始菜单启动会以普通权限运行、控不了风扇

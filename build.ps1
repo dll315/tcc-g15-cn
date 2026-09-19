@@ -34,7 +34,10 @@ if ($LASTEXITCODE) { throw "PyInstaller 失败" }
 # 安装版 Setup（Inno）
 $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if (-not $iscc) {
-    foreach ($c in "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") {
+    # winget 的 --scope user 会装到这里，只查 Program Files 会误判成"没装"（实测踩到）
+    foreach ($c in "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                   "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+                   "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
         if (Test-Path $c) { $iscc = $c; break }
     }
 }
