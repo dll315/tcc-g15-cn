@@ -1,59 +1,82 @@
-# TCC-G15 中文改造版
+# TCC-G15 中文改造版 · 详细说明
 
 基于 [AlexIII/tcc-g15](https://github.com/AlexIII/tcc-g15) v1.6.4 二次开发的中文增强版。原始项目是戴尔 G15 / Alienware 笔记本风扇与温度控制的开源替代品（替代 AWCC）。
 
 > 许可协议：沿用上游 **GPL v3**（© github.com/AlexIII）
 
-## 改造内容（相对上游 v1.6.4）
+当前版本 **1.7.1-cn**。
+
+## 相对上游的改造
 
 ### ① 全面中文化
-- 窗口标题、托盘菜单、对话框、tooltip 全部翻译为中文
-- 模式名：均衡 / 性能模式 / 自定义 / 自动曲线
-- 错误提示、日志表头中文化
+窗口标题、托盘菜单、对话框、tooltip、错误提示、CSV 表头全部中文。模式名：均衡 / 性能模式 / 自定义 / 自动曲线。
 
 ### ② UI 现代化
-- 深蓝灰主题 + 蓝色 accent，重写 QSS（圆角、渐变、单选钮 / 复选框 / 滑块 / ComboBox / Menu 全面翻新）
-- 窗口宽度 600 → 660（容纳温度走势图）
+深蓝灰主题 + 蓝色 accent，重写 QSS（圆角/渐变/单选钮/复选框/滑条/ComboBox/Menu）。窗口宽 600 → 660。配色统一取自 `GUI/AppColors.py` 的 `Colors` 枚举，组件内不再散落十六进制字面量。
 
 ### ③ 新增功能
-| 功能 | 说明 |
-|---|---|
-| 温度走势图 | `GUI/TempHistoryGraph.py`：QPainter 自绘最近 5 分钟 GPU/CPU 双曲线，渐变填充，无新依赖 |
-| CSV 日志 | `Backend/TempLogger.py`：按天分文件 `logs/temp_log_YYYY-MM-DD.csv`，托盘菜单可开关 |
-| 自动曲线模式 | `Backend/FanCurve.py` + `GUI/FanCurveEditor.py`：自定义温度→风速曲线，程序每秒按温度自动调风扇 |
-| 全局热键 | `Ctrl+Alt+T` 呼出/隐藏窗口 |
+| 功能 | 实现 | 说明 |
+|---|---|---|
+| 温度走势图 | `GUI/TempHistoryGraph.py` | 最近 5 分钟 GPU/CPU 双曲线，两条曲线共用一套纵轴标度，无新依赖 |
+| CSV 日志 | `Backend/TempLogger.py` | 按天分文件，`utf-8-sig` 编码，托盘菜单可开关，跨日自动换文件 |
+| 自动曲线模式 | `Backend/FanCurve.py` + `GUI/FanCurveEditor.py` | 温度→风速分段线性插值，程序每秒按温度查曲线并下发 |
+| 全局热键 | `GUI/HotKey.py` | `Ctrl+Alt+T` 显隐窗口（G 键 = `F13` 切性能，沿用上游） |
+| 设置隔离 | `AppGUI.SETTINGS_ORG` | 用改造版自己的注册表路径，避免新增的 `Auto` 模式污染原版设置 |
 
-### ④ 其他
-- 修上游 `_destroy()` 潜在 bug
-- 版本号 → 1.7.0-cn
+### ④ 1.7.1-cn 修复
+| 问题 | 后果 | 现在 |
+|---|---|---|
+| 开机自启写 `HKCU\...\Run` | Run 键无法提权，exe 又是 `asInvoker` → 每次开机都以普通权限启动、拿不到 WMI 写权限，自启等于失效 | 改回**提权计划任务**（`HighestAvailable` + 登录触发）；任务 XML 作为常量内嵌在代码里、运行时写到 `%TEMP%`，不再依赖打包目录里的只读文件 |
+| 模式切换下发失败即 `sys.exit` | 若失败发生在温度保护抢救散热的瞬间，程序直接消失且**不恢复档位**，保护形同放弃 | 记下待重试模式，每秒静默重试，只弹一次提示 |
+| 读档恢复日志开关时不建目录 | `logs/` 不存在时日志一个字节都不写，而托盘仍显示"已开启" | 建目录移到真正打开文件的地方 |
+| 传感器失联（读数为 None） | 每秒抛 `TypeError`，连带跳过该秒后面的托盘刷新与设置保存 | 失联时托盘画 `--`，通知文案显示「无读数」而不是上一次的旧温度 |
+| 拖动曲线点每次都回调 | 一次拖动产生上百次 WMI 写 + 注册表写 | 只在松开鼠标时下发一次 |
+| 拖动可以越过邻居点 | 排序后编辑器的索引失效，会把相邻控制点改掉 | 拖拽温度被钳在左右邻居各留 3°C 的区间内，点顺序永远不变 |
+| 自动曲线每秒重复下发同一个转速 | 温度在拐点附近抖动时风扇反复变速 | 只在下发值变化时写 |
+| 阈值 tooltip 构造时冻结 | 改了下拉框，提示文字仍显示 85/95 | 随下拉框刷新，并写明"无读数也算高温" |
+| 源码运行时资源路径跟随当前目录 | 不在 `源码/` 下启动就找不到图标 | 锚定到模块所在目录 |
+| 前端/后端两套同名枚举靠名字字符串对接 | 任一侧改名即运行时 KeyError | 显式映射表 `UI_MODE_TO_BACKEND` |
 
 ## 自动曲线模式用法
 
-1. 单选钮选「自动曲线」
-2. 点开曲线编辑器（GPU / CPU 切换）
-3. 双击空白处加点、拖动改点、右键删点
-4. 程序每秒按当前温度查曲线、插值出风速、自动下发
+1. 单选钮选「自动曲线」（底层实际使用 AWCC 的 Custom 手动档）
+2. 在曲线编辑器里 GPU / CPU 各自切换
+3. **拖动**圆点改值，**双击空白处**加点，**双击圆点**删点（至少保留 2 个，最多 10 个，相邻点至少间隔 3°C）
+4. 程序每秒读温度 → 插值 → 下发；温度低于最左点保持最左风速，高于最右点强制 100%
 
-底层实现：AWCC WMI 接口只有 Balanced / G_Mode / Custom 三档，自动曲线模式在底层使用 Custom 档，风速由程序按曲线计算后下发。
+## 温度保护
 
-## 运行（源码）
+勾选后：GPU 或 CPU 温度达到阈值（或**传感器无读数**）持续 8 秒 → 自动切性能模式；温度回落到阈值以下 60 秒 → 自动恢复原模式。全程弹 Windows 通知。
+
+阈值可调：GPU 50~90°C，CPU 50~100°C。指示灯颜色：绿=正常，黄=曾出现高温，红=正在保护中。
+
+## 权限
+
+写戴尔 WMI 的风扇方法需要管理员权限；普通权限下能读温度但控不了风扇。
+
+- 启动时自检权限，不足则提示「以管理员身份重启」
+- exe 不带 `requireAdministrator` 清单：双击运行需右键「以管理员身份运行」，或用安装版创建的快捷方式（已带提权位）
+- 开机自启 = 计划任务 `TCC_G15`，需在管理员权限下开启。手动移除：`schtasks /delete /tn TCC_G15 /f`，或用托盘菜单的「关闭自启」
+
+## 开发与构建
 
 ```
-pip install -r requirements.txt
-python src\tcc-g15.py
+pip install -r requirements.txt        # 运行依赖
+powershell -File build.ps1             # 构建便携版 + 安装版（需 pip install pyinstaller 与 Inno Setup 6）
+powershell -File build.ps1 -Debug      # 带控制台的调试版，print 才看得见
 ```
 
-## 打包
+手工构建便携版等价命令（在仓库根目录）：
 
 ```
-python -m PyInstaller --noconfirm --clean --onefile --windowed \
-  --name tcc-g15-cn \
-  --icon icons/gaugeIcon-cn.ico \
-  --add-data "icons;icons" \
-  src/tcc-g15.py
+pyinstaller --noconfirm --clean --onefile --windowed --name tcc-g15-cn ^
+  --icon 源码/icons/gaugeIcon-cn.ico --paths 源码/src --add-data "源码/icons;icons" ^
+  --distpath dist 源码/src/tcc-g15.py
 ```
 
-> 注意：Windows 下 `--add-data` 的分隔符是 `;`（不是 Linux 的 `:`）
+> Windows 下 `--add-data` 的分隔符是 `;`（不是 Linux 的 `:`）。产物一律发到 Release，不进 git（`.gitignore` 已屏蔽 `*.exe`）。
+
+代码组织上有一处已知技术债：`TCC_GUI.__init__` 约 350 行、内含十余个闭包，每秒刷新的 `updateAppState` 承担了读数/绘图/曲线/日志/保护/托盘/存档七件事。逻辑本身已被逐项验证，但改动时建议先把它拆成独立方法再动手，否则任何一处异常都会带走整轮刷新。
 
 ## 支持的机型
 
@@ -61,18 +84,14 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed \
 - Dell Alienware m16 R1
 - Dell G3 3590
 
-可能也适用于其他戴尔 G15 / Alienware 笔记本。
+「CPU=风扇 0、GPU=风扇 1」是写死的假设，其他机型若出现滑条与仪表张冠李戴，即该假设不成立。
 
 ## 依赖
 
-见 `requirements.txt`：
+见 `requirements.txt`：WMI >= 1.5.1、PySide6 >= 6.2.2.1 且 < 7、windows-toasts >= 1.3.0。
 
-- WMI >= 1.5.1
-- PySide6 >= 6.2.2.1
-- windows-toasts >= 1.3.0
+## 已知限制
 
-## 已知限制（继承自上游）
-
-- 需要管理员权限（访问 WMI 接口）
 - 「手动」风扇控制并非真手动——风速过低时 BIOS 会接管自动提高转速防过热
-- 切到 G 模式再切回可能导致约 1 秒系统卡顿（戴尔热控接口的已知问题，无法修复）
+- 切到 G 模式再切回可能有约 1 秒系统卡顿（戴尔热控接口的已知问题）
+- `RegisterHotKey` 失败（热键被别的程序占了）只在控制台打印，windowed 构建下看不到
