@@ -4,13 +4,21 @@
 
 基于 [AlexIII/tcc-g15](https://github.com/AlexIII/tcc-g15) v1.6.4 二次开发，许可协议沿用 **GPL v3**。
 
-## 文件说明
+## 下载
 
-| 目录 | 内容 |
+成品在 [Releases](https://github.com/dll315/tcc-g15-cn/releases/latest)，不以二进制形式提交进仓库：
+
+| 文件 | 用途 |
 |---|---|
-| `便携版/` | 免安装单文件 exe，双击即跑（需管理员权限） |
+| `tcc-g15-cn.exe` | 免安装单文件，右键「以管理员身份运行」 |
+| `TCC-G15-cn-<版本号>-Setup.exe` | Inno Setup 安装器，安装到开始菜单 + 桌面快捷方式 |
+
+## 仓库内容
+
+| 路径 | 内容 |
+|---|---|
 | `源码/` | 完整源代码 + 依赖清单 + 中文说明 |
-| `安装版/` | Inno Setup 安装器，可安装到开始菜单 + 桌面快捷方式 |
+| `安装版/installer-cn.iss` | 安装器的 Inno Setup 脚本 |
 
 ## 新增功能（相对上游）
 
@@ -23,12 +31,10 @@
 
 ## 快速开始
 
-**免安装**：下载 `便携版/tcc-g15-cn.exe`，右键「以管理员身份运行」。
+下载上表的任一成品运行即可。从源码运行：
 
-**安装版**：下载 `安装版/TCC-G15-cn-1.7.0-cn-Setup.exe`，双击安装。
-
-**源码运行**：
 ```
+cd 源码
 pip install -r requirements.txt
 python src/tcc-g15.py
 ```

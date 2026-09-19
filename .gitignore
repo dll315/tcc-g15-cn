@@ -17,3 +17,6 @@ logs/
 *.tmp
 .DS_Store
 Thumbs.db
+
+# 构建产物：只发 Release，提交进 git 会让每次重新构建永久增加 ~95MB 历史
+*.exe
