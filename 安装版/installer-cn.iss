@@ -9,7 +9,8 @@
 #define MyAppExeName "tcc-g15-cn.exe"
 
 [Setup]
-AppId={{8009F57D-B404-4274-BB42-A8AEBB02F37F}
+; AppId 是 Windows 识别“同一个产品”的唯一标识，沿用上游会让两个安装包互相覆盖/顶替卸载记录
+AppId={{854F7CD8-AA8F-455C-AA9A-8BF64E22FC86}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}

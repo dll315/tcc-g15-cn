@@ -49,7 +49,10 @@ def appIcon() -> QtGui.QIcon:
         return QtGui.QIcon(p2)
     return QtGui.QIcon()
 
-TASK_NAME = "TCC_G15"
+# 任务名必须与原版区分：上游 AlexIII/tcc-g15 注册的计划任务就叫 TCC_G15，
+# 同名会让两个程序互相覆盖、互相删除对方的开机自启
+TASK_NAME = "TCC_G15_CN"
+LEGACY_RUN_VALUE = "TCC_G15"     # 1.7.0-cn 用 Run 键做自启时留下的值
 
 # 开机自启必须是提权任务，否则程序以普通权限启动、拿不到 AWCC 的 WMI 写权限。
 # HKCU\...\Run 键天生无法提权，所以用计划任务：InteractiveToken + HighestAvailable
@@ -114,10 +117,29 @@ def relaunchElevated() -> bool:
     except Exception:
         return False
 
+def cleanupLegacyRunEntry() -> None:
+    """删除 1.7.0-cn 写在 HKCU Run 键里的自启值。
+    留着它会与计划任务并存：开机拉起两份程序，或指向一个已被移走的 exe 而每次开机报错。"""
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                             r"Software\Microsoft\Windows\CurrentVersion\Run",
+                             0, winreg.KEY_SET_VALUE)
+    except OSError:
+        return
+    try:
+        winreg.DeleteValue(key, LEGACY_RUN_VALUE)
+    except OSError:
+        pass
+    finally:
+        winreg.CloseKey(key)
+
 def autorunTask(action: Literal['add', 'remove']) -> int:
     """开机自启：创建/删除提权计划任务。返回 0 成功，非 0 为 schtasks 退出码。"""
     import subprocess
     import tempfile
+
+    cleanupLegacyRunEntry()
 
     if action == 'add':
         exeFile = appExePath()
