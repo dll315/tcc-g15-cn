@@ -65,7 +65,10 @@ TASK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
     <URI>\\{task_name}</URI>
   </RegistrationInfo>
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+    </LogonTrigger>
   </Triggers>
   <Principals>
     <Principal id="Author">
@@ -134,24 +137,27 @@ def cleanupLegacyRunEntry() -> None:
     finally:
         winreg.CloseKey(key)
 
-def autorunTask(action: Literal['add', 'remove']) -> int:
-    """开机自启：创建/删除提权计划任务。返回 0 成功，非 0 为 schtasks 退出码。"""
+def autorunTask(action: Literal['add', 'remove']) -> Tuple[int, str]:
+    """开机自启：创建/删除提权计划任务。返回 (0, '') 表示成功。
+
+    第二个返回值是 schtasks 的原话：windowed 构建里 print 无处可看，不把失败原因
+    带到界面上，用户就只能看到一个没有信息量的错误码。"""
     import subprocess
     import tempfile
 
     if action == 'add':
         exeFile = appExePath()
         if not exeFile.lower().endswith('.exe'):
-            return -100           # 源码运行，没有可自启的 exe
+            return -100, '当前是源码运行，没有可自启的 exe，请用打包出的 tcc-g15-cn.exe 再开启'
         if not isElevated():
-            return -101           # 建不了 HighestAvailable 任务
+            return -101, '当前不是管理员权限，无法创建提权自启任务。请先右键程序「以管理员身份运行」再开启'
         xml = TASK_XML_TEMPLATE.format(task_name=TASK_NAME, exe=os.path.normpath(exeFile))
         xmlPath = os.path.join(tempfile.gettempdir(), 'tcc_g15_cn_task.xml')
         try:
             with open(xmlPath, 'w', encoding='utf-16') as f:   # schtasks 要求声明与实际编码一致
                 f.write(xml)
-        except OSError:
-            return -102
+        except OSError as ex:
+            return -102, f'写入临时任务文件失败：{ex}'
         cmd = ['schtasks', '/create', '/f', '/tn', TASK_NAME, '/xml', xmlPath]
     else:
         cmd = ['schtasks', '/delete', '/f', '/tn', TASK_NAME]
@@ -160,18 +166,17 @@ def autorunTask(action: Literal['add', 'remove']) -> int:
         # 列表参数、不走 shell：路径里有空格或 & 都不会被当成命令
         res = subprocess.run(cmd, capture_output=True, text=True)
     except OSError as ex:
-        print(f'autorunTask failed to run schtasks: {ex}')
-        return -103
+        return -103, f'无法执行 schtasks：{ex}'
     if res.returncode != 0:
         print(f'schtasks {action} failed: {res.stdout} {res.stderr}')
         # 删除一个本就不存在的任务，schtasks 也返回非 0，这种"失败"要当成功
         if action == 'remove' and ('找不到' in (res.stderr + res.stdout) or 'cannot find' in (res.stderr + res.stdout).lower()):
             cleanupLegacyRunEntry()
-            return 0
-    else:
-        # 只有任务真的处理成功才清旧 Run 值：否则建任务失败 + 旧项被删 = 自启彻底失效
-        cleanupLegacyRunEntry()
-    return res.returncode
+            return 0, ''
+        return res.returncode, (res.stdout + res.stderr).strip()[:400]
+    # 只有任务真的处理成功才清旧 Run 值：否则建任务失败 + 旧项被删 = 自启彻底失效
+    cleanupLegacyRunEntry()
+    return 0, ''
 
 def alert(title: str, message: str, type: QtWidgets.QMessageBox.Icon = QtWidgets.QMessageBox.Icon.Information, *, message2: Optional[str] = None) -> None:
     msg = QtWidgets.QMessageBox(type, title, message)
@@ -371,11 +376,13 @@ class TCC_GUI(QtWidgets.QWidget):
             -101: '需要管理员权限才能创建提权自启任务',
             -102: '无法写入临时目录',
             -103: '找不到 schtasks 命令',
+            1: '任务计划程序拒绝了创建请求，详见下方原文',
         }
         def autorunTaskRun(action: Literal['add', 'remove']) -> None:
-            err = autorunTask(action)
+            err, detail = autorunTask(action)
             if err != 0 and action == 'add':
-                alert("错误", "添加自启任务失败：" + AUTORUN_ERRORS.get(err, f'错误码 {err}'), QtWidgets.QMessageBox.Icon.Critical)
+                alert("开机自启未开启", AUTORUN_ERRORS.get(err, detail or f'错误码 {err}'),
+                      QtWidgets.QMessageBox.Icon.Critical)
             else:
                 alert("成功", f"开机自启已{'开启' if action == 'add' else '关闭'}")
             # When in minimized state, a wired bug causes the app to close if we won't touch some of the `self.show*()` methods
