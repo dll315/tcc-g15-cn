@@ -1,8 +1,9 @@
 ; Inno Setup 安装脚本 - TCC-G15 中文改造版
-; 基于上游 installer-inno-config.iss 修改
+; 由 build.ps1 调用：iscc 安装版\installer-cn.iss
+; 路径全部相对于本脚本所在目录（{#SourceDir}），换机器换盘符也能构建
 
 #define MyAppName "TCC G15 中文版"
-#define MyAppVersion "1.7.0-cn"
+#define MyAppVersion "1.7.1-cn"
 #define MyAppPublisher "dll315"
 #define MyAppURL "https://github.com/dll315/tcc-g15-cn"
 #define MyAppExeName "tcc-g15-cn.exe"
@@ -17,11 +18,12 @@ AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 DefaultDirName={autopf}\{#MyAppName}
 DisableProgramGroupPage=yes
-LicenseFile=G:\buddyworks\tcc\tcc-g15-cn-release\源码\LICENSE
+LicenseFile={#SourceDir}..\源码\LICENSE
+; 程序本体需要管理员权限，但安装本身不需要：自启走提权计划任务，装在用户目录即可
 PrivilegesRequired=lowest
-OutputDir=G:\buddyworks\tcc\tcc-g15-cn-release\安装版
+OutputDir={#SourceDir}..\dist
 OutputBaseFilename="TCC-G15-cn-{#MyAppVersion}-Setup"
-SetupIconFile=G:\buddyworks\tcc\tcc-g15-cn-release\源码\icons\gaugeIcon-cn.ico
+SetupIconFile={#SourceDir}..\源码\icons\gaugeIcon-cn.ico
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
@@ -33,10 +35,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "G:\buddyworks\tcc\tcc-g15-cn-release\便携版\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; 两个快捷方式都要打提权位，否则从开始菜单启动会以普通权限运行、控不了风扇
+Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; AfterInstall: SetElevationBit('{autoprograms}\{#MyAppName}.lnk')
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; AfterInstall: SetElevationBit('{autodesktop}\{#MyAppName}.lnk')
 
 [Run]

@@ -4,6 +4,7 @@ from typing import Callable, Literal, Optional, Tuple, List
 from PySide6 import QtCore, QtGui, QtWidgets
 from windows_toasts import WindowsToaster, Toast, ToastDuration, ToastDisplayImage
 from Backend.AWCCThermal import AWCCThermal, NoAWCCWMIClass, CannotInstAWCCWMI
+from Backend.AWCCWmiWrapper import AWCCWmiWrapper
 from Backend.TempLogger import TempLogger
 from Backend.FanCurve import FanCurve
 from GUI.QRadioButtonSet import QRadioButtonSet
@@ -19,8 +20,12 @@ from Backend.DetectHardware import DetectHardware
 GUI_ICON = 'icons/gaugeIcon-cn.ico'
 GUI_ICON_FALLBACK = 'icons/gaugeIcon.png'
 
+# 资源锚点：打包后用 PyInstaller 的解包目录；源码运行时本文件位于 源码/src/GUI/，上三层才是 源码/
+_APP_ROOT = getattr(sys, '_MEIPASS', None) or os.path.dirname(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 def resourcePath(relativePath: str = '.'):
-    return os.path.join(sys._MEIPASS if hasattr(sys, '_MEIPASS') else os.path.abspath('.'), relativePath)
+    return os.path.join(_APP_ROOT, relativePath)
 
 def appExePath() -> str:
     """返回当前运行的真实可执行文件路径。
@@ -44,47 +49,105 @@ def appIcon() -> QtGui.QIcon:
         return QtGui.QIcon(p2)
     return QtGui.QIcon()
 
+TASK_NAME = "TCC_G15"
+
+# 开机自启必须是提权任务，否则程序以普通权限启动、拿不到 AWCC 的 WMI 写权限。
+# HKCU\...\Run 键天生无法提权，所以用计划任务：InteractiveToken + HighestAvailable
+# 在登录时以管理员身份启动且不弹 UAC。XML 作为常量内嵌、运行时写 %TEMP%，
+# 不再依赖打包目录里的外部文件（_MEIPASS 只读，改写在打包后必然失败）。
+TASK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>TCC-G15 中文改造版 开机自启 | github.com/dll315/tcc-g15-cn</Description>
+    <URI>\\{task_name}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled></LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings><StopOnIdleEnd>false</StopOnIdleEnd><RestartOnIdle>false</RestartOnIdle></IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>"{exe}"</Command>
+      <Arguments>--minimized</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+def isElevated() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+def relaunchElevated() -> bool:
+    """请求 UAC 提权重启本程序。用户取消或环境不支持时返回 False。"""
+    exe = appExePath()
+    if not exe.lower().endswith('.exe'):
+        return False
+    try:
+        import ctypes
+        params = ' '.join(f'"{a}"' for a in sys.argv[1:])
+        # SW_SHOW=5；返回值 <=32 表示失败（含用户在 UAC 上点了"否"）
+        return int(ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, params, None, 5)) > 32
+    except Exception:
+        return False
+
 def autorunTask(action: Literal['add', 'remove']) -> int:
-    """开机自启：写入/删除注册表 HKCU\\...\\Run 键。
+    """开机自启：创建/删除提权计划任务。返回 0 成功，非 0 为 schtasks 退出码。"""
+    import subprocess
+    import tempfile
 
-    改为注册表方案（替代原 schtasks+xml），原因：
-    1. 原方案依赖外部 tcc_g15_task.xml，便携版打包时容易漏掉；
-    2. xml 方案需在运行时改写临时目录（sys._MEIPASS 只读），打包后必然失败；
-    3. 注册表 Run 键无需外部文件、无需管理员权限（HKCU）、对便携版最可靠。
-    """
-    RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-    VALUE_NAME = "TCC_G15"
-    exeFile = appExePath()
-
-    try:
-        import winreg
-    except ImportError:
-        return -1
-
-    try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0,
-                             winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE)
-    except OSError:
+    if action == 'add':
+        exeFile = appExePath()
+        if not exeFile.lower().endswith('.exe'):
+            return -100           # 源码运行，没有可自启的 exe
+        if not isElevated():
+            return -101           # 建不了 HighestAvailable 任务
+        xml = TASK_XML_TEMPLATE.format(task_name=TASK_NAME, exe=os.path.normpath(exeFile))
+        xmlPath = os.path.join(tempfile.gettempdir(), 'tcc_g15_cn_task.xml')
         try:
-            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY)
+            with open(xmlPath, 'w', encoding='utf-16') as f:   # schtasks 要求声明与实际编码一致
+                f.write(xml)
         except OSError:
-            return -2
+            return -102
+        cmd = ['schtasks', '/create', '/f', '/tn', TASK_NAME, '/xml', xmlPath]
+    else:
+        cmd = ['schtasks', '/delete', '/f', '/tn', TASK_NAME]
 
     try:
-        if action == 'add':
-            if not exeFile.lower().endswith('.exe'):
-                return -100
-            # 用引号包裹路径，防止路径含空格时失效；--minimized 启动后最小化到托盘
-            cmd = f'"{exeFile}" --minimized'
-            winreg.SetValueEx(key, VALUE_NAME, 0, winreg.REG_SZ, cmd)
-        else:
-            try:
-                winreg.DeleteValue(key, VALUE_NAME)
-            except FileNotFoundError:
-                pass  # 本来就没有，忽略
-        return 0
-    finally:
-        winreg.CloseKey(key)
+        # 列表参数、不走 shell：路径里有空格或 & 都不会被当成命令
+        res = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as ex:
+        print(f'autorunTask failed to run schtasks: {ex}')
+        return -103
+    if res.returncode != 0:
+        print(f'schtasks {action} failed: {res.stdout} {res.stderr}')
+        # 删除一个本就不存在的任务，schtasks 也返回非 0，这种"失败"要当成功
+        if action == 'remove' and ('找不到' in (res.stderr + res.stdout) or 'cannot find' in (res.stderr + res.stdout).lower()):
+            return 0
+    return res.returncode
 
 def alert(title: str, message: str, type: QtWidgets.QMessageBox.Icon = QtWidgets.QMessageBox.Icon.Information, *, message2: Optional[str] = None) -> None:
     msg = QtWidgets.QMessageBox(type, title, message)
@@ -139,6 +202,15 @@ MODE_DISPLAY = {
 def modeDisplayName(modeValue: str) -> str:
     return MODE_DISPLAY.get(modeValue, modeValue)
 
+# UI 模式 -> AWCC 后端档位。显式写出而不是 Mode[名字]，
+# 否则两套同名枚举任何一侧改名都会在这里变成运行时 KeyError。
+UI_MODE_TO_BACKEND = {
+    ThermalMode.Balanced.value: AWCCWmiWrapper.ThermalMode.Balanced,
+    ThermalMode.G_Mode.value:   AWCCWmiWrapper.ThermalMode.G_Mode,
+    ThermalMode.Custom.value:   AWCCWmiWrapper.ThermalMode.Custom,
+    ThermalMode.Auto.value:     AWCCWmiWrapper.ThermalMode.Custom,   # 自动曲线借用手动档
+}
+
 class SettingsKey(Enum):
     Mode = "app/mode"
     CPUFanSpeed = "app/fan/cpu/speed"
@@ -159,12 +231,14 @@ def errorExit(message: str, message2: Optional[str] = None) -> None:
 
 class TCC_GUI(QtWidgets.QWidget):
     TEMP_UPD_PERIOD_MS = 1000
-    FAILSAFE_CPU_TEMP = 95
-    FAILSAFE_GPU_TEMP = 85
+    DEFAULT_FAILSAFE_CPU_TEMP = 95
+    DEFAULT_FAILSAFE_GPU_TEMP = 85
+    FAILSAFE_CPU_TEMP = DEFAULT_FAILSAFE_CPU_TEMP
+    FAILSAFE_GPU_TEMP = DEFAULT_FAILSAFE_GPU_TEMP
     FAILSAFE_TRIGGER_DELAY_SEC = 8
     FAILSAFE_RESET_AFTER_TEMP_IS_OK_FOR_SEC = 60
     APP_NAME = "G15 温控中心"
-    APP_VERSION = "1.7.0-cn"
+    APP_VERSION = "1.7.1-cn"
     APP_DESCRIPTION = "Alienware Command Center 的开源替代品（中文改造版）"
     APP_URL = "github.com/AlexIII/tcc-g15"
     # 设置存储隔离：必须与原作者不同，否则改造版的 'Auto' 模式会污染原版设置、导致原版崩溃
@@ -178,6 +252,8 @@ class TCC_GUI(QtWidgets.QWidget):
     _failsafeTempIsHighTs = 0                           # Last time when the temp was registered to be high
     _failsafeTempIsHighStartTs: Optional[int] = None    # Time when the temp first registered to be high (without going lower than the threshold)
     _failsafeTrippedPrevModeStr: Optional[str] = None   # Mode (Custom, Balanced) before fail-safe tripped, as a string
+    _pendingMode: Optional[str] = None                  # 下发失败、需要重试的模式
+    _lastSensorTemps: Tuple[Optional[int], Optional[int]] = (None, None)
     _failsafeOn = True
     _prevSavedSettingsValues: list = []
 
@@ -266,10 +342,16 @@ class TCC_GUI(QtWidgets.QWidget):
         openLogDirAction.triggered.connect(openLogDir)
 
         addToAutorunAction = menu.addAction("开机自启")
+        AUTORUN_ERRORS = {
+            -100: '源码运行没有可自启的 exe，请用打包后的 exe 再开启',
+            -101: '需要管理员权限才能创建提权自启任务',
+            -102: '无法写入临时目录',
+            -103: '找不到 schtasks 命令',
+        }
         def autorunTaskRun(action: Literal['add', 'remove']) -> None:
             err = autorunTask(action)
             if err != 0 and action == 'add':
-                alert("错误", f"{'添加' if action == 'add' else '移除'}自启任务失败，错误码 {err}", QtWidgets.QMessageBox.Icon.Critical)
+                alert("错误", "添加自启任务失败：" + AUTORUN_ERRORS.get(err, f'错误码 {err}'), QtWidgets.QMessageBox.Icon.Critical)
             else:
                 alert("成功", f"开机自启已{'开启' if action == 'add' else '关闭'}")
             # When in minimized state, a wired bug causes the app to close if we won't touch some of the `self.show*()` methods
@@ -369,15 +451,21 @@ class TCC_GUI(QtWidgets.QWidget):
         def onLimitGPUChange():
             val = self._limitTempGPU.currentText()
             if val.isdigit(): self.FAILSAFE_GPU_TEMP = int(val)
+            updFailsafeTooltip()
         self._limitTempGPU.currentIndexChanged.connect(onLimitGPUChange)
         def onLimitCPUChange():
             val = self._limitTempCPU.currentText()
             if val.isdigit(): self.FAILSAFE_CPU_TEMP = int(val)
+            updFailsafeTooltip()
         self._limitTempCPU.currentIndexChanged.connect(onLimitCPUChange)
 
         # Fail-safe checkbox
         self._failsafeCB = QtWidgets.QCheckBox("温度保护")
-        self._failsafeCB.setToolTip(f"当 GPU 温度达到 {self.FAILSAFE_GPU_TEMP}°C 或 CPU 温度达到 {self.FAILSAFE_CPU_TEMP}°C 时，自动切换到性能模式（风扇全速）")
+        def updFailsafeTooltip():
+            self._failsafeCB.setToolTip(
+                f"当 GPU 温度达到 {self.FAILSAFE_GPU_TEMP}°C 或 CPU 温度达到 {self.FAILSAFE_CPU_TEMP}°C 时"
+                "（传感器无读数也算），持续 8 秒自动切换到性能模式，降温 60 秒后恢复")
+        updFailsafeTooltip()
         def onFailsafeCB():
             self._failsafeOn = self._failsafeCB.isChecked()
             self._failsafeTempIsHighTs = 0
@@ -416,16 +504,18 @@ class TCC_GUI(QtWidgets.QWidget):
             res = self._awcc.setFanSpeed(self._awcc.GPUFanIdx if fan == 'GPU' else self._awcc.CPUFanIdx, speed)
             print(f'Set {fan} fan speed to {speed}: ' + ('ok' if res else 'fail'))
 
+        self._lastAutoFanSpeed = {}      # 上次下发的自动曲线目标转速，用于去重
         def applyAutoFanCurve(gpuTemp = None, cpuTemp = None) -> None:
             """自动曲线模式：按当前温度查曲线得到风扇百分比并下发。"""
             if self._modeSwitch.getChecked() != ThermalMode.Auto.value:
                 return
             if gpuTemp is None: gpuTemp = self._thermalGPU.getTemp()
             if cpuTemp is None: cpuTemp = self._thermalCPU.getTemp()
-            gpuSpeed = self._gpuCurve.speedAt(gpuTemp)
-            cpuSpeed = self._cpuCurve.speedAt(cpuTemp)
-            if gpuSpeed is not None: setFanSpeed('GPU', gpuSpeed)
-            if cpuSpeed is not None: setFanSpeed('CPU', cpuSpeed)
+            # 同一秒内目标值没变就不再写 WMI：温度在拐点附近抖动时避免风扇反复变速
+            for fan, speed in (('GPU', self._gpuCurve.speedAt(gpuTemp)), ('CPU', self._cpuCurve.speedAt(cpuTemp))):
+                if speed is not None and speed != self._lastAutoFanSpeed.get(fan):
+                    self._lastAutoFanSpeed[fan] = speed
+                    setFanSpeed(fan, speed)
 
         def updateFanSpeed():
             if self._modeSwitch.getChecked() != ThermalMode.Custom.value:
@@ -440,12 +530,17 @@ class TCC_GUI(QtWidgets.QWidget):
             self._thermalGPU.setSpeedDisabled(val != ThermalMode.Custom.value)
             self._thermalCPU.setSpeedDisabled(val != ThermalMode.Custom.value)
             self._curveEditor.setEnabled(isAuto)
-            # 自动曲线模式底层使用 Custom（手动）档，风速由程序按曲线控制
-            backendModeName = ThermalMode.Custom.value if isAuto else val
-            res = self._awcc.setMode(self._awcc.Mode[backendModeName])
+            self._lastAutoFanSpeed.clear()        # 换档后让曲线重新压一遍目标转速
+            res = self._awcc.setMode(UI_MODE_TO_BACKEND[val])   # Auto 借 Custom 档，风速由程序按曲线给
             print(f'Set mode {val}: ' + ('ok' if res else 'fail'))
             if not res:
-                self._errorExit(f"模式切换失败：{modeDisplayName(val)}", "程序即将退出")
+                # 绝不能在这里退出：这一刻可能正是温度保护在抢救散热，程序消失等于放弃保护
+                self._pendingMode = val
+                alert("模式切换失败", f"切换到「{modeDisplayName(val)}」失败，程序会每秒自动重试。\n"
+                      "常见原因：AWCC 服务还没就绪，或本程序没有管理员权限。",
+                      QtWidgets.QMessageBox.Icon.Warning)
+            else:
+                self._pendingMode = None
             updateFanSpeed()
             if isAuto:
                 applyAutoFanCurve()
@@ -465,6 +560,14 @@ class TCC_GUI(QtWidgets.QWidget):
             gpuRPM = self._awcc.getFanRPM(self._awcc.GPUFanIdx)
             cpuTemp = self._awcc.getFanRelatedTemp(self._awcc.CPUFanIdx)
             cpuRPM = self._awcc.getFanRPM(self._awcc.CPUFanIdx)
+            # 原始读数（可能是 None）。仪表盘显示的是上一次的旧值，提示文案要用原始值
+            self._lastSensorTemps = (gpuTemp, cpuTemp)
+            # 上一次切档失败的话先重试，成功了才做别的
+            if self._pendingMode is not None:
+                retry = self._pendingMode
+                if self._awcc.setMode(UI_MODE_TO_BACKEND[retry]):
+                    print(f'模式重试成功：{retry}')
+                    self._pendingMode = None
             # Update UI gauges
             if gpuTemp is not None: self._thermalGPU.setTemp(gpuTemp)
             if gpuRPM is not None: self._thermalGPU.setFanRPM(gpuRPM)
@@ -571,10 +674,6 @@ class TCC_GUI(QtWidgets.QWidget):
         self._destroy()
         sys.exit(0)
 
-    def _errorExit(self, message: str, message2: Optional[str] = None) -> None:
-        self._destroy()
-        errorExit(message, message2)
-
     def _destroy(self):
         if self.gModeHotKey is not None:
             self.gModeHotKey.stop()
@@ -603,12 +702,18 @@ class TCC_GUI(QtWidgets.QWidget):
             self.activateWindow()
             self.raise_()
 
+    def _sensorSummary(self) -> str:
+        gpu, cpu = self._lastSensorTemps
+        def one(name: str, v: Optional[int]) -> str:
+            return f"{name}：无读数" if v is None else f"{name}：{v}°C"
+        return f"{one('GPU', gpu)}，{one('CPU', cpu)}"
+
     def _toasterMessageCurrentMode(self, source: Optional[Literal['failsafe']] = None) -> None:
         sourceStr = " [温度保护]" if source == 'failsafe' else ""
         self.toasterMessage(
             [
                 modeDisplayName(self._modeSwitch.getChecked()),
-                f"GPU：{self._thermalGPU.getTemp()}°C，CPU：{self._thermalCPU.getTemp()}°C",
+                self._sensorSummary(),
                 "散热模式已切换" + sourceStr
             ],
             source != 'failsafe'
@@ -653,9 +758,9 @@ class TCC_GUI(QtWidgets.QWidget):
         self._thermalCPU.setSpeedSlider(savedSpeed)
         savedSpeed = self.settings.value(SettingsKey.GPUFanSpeed.value)
         self._thermalGPU.setSpeedSlider(savedSpeed)
-        savedTemp = self.settings.value(SettingsKey.CPUThresholdTemp.value) or 95
+        savedTemp = self.settings.value(SettingsKey.CPUThresholdTemp.value) or self.__class__.DEFAULT_FAILSAFE_CPU_TEMP
         self._limitTempCPU.setCurrentText(str(savedTemp))
-        savedTemp = self.settings.value(SettingsKey.GPUThresholdTemp.value) or 85
+        savedTemp = self.settings.value(SettingsKey.GPUThresholdTemp.value) or self.__class__.DEFAULT_FAILSAFE_GPU_TEMP
         self._limitTempGPU.setCurrentText(str(savedTemp))
         savedFailsafe = self.settings.value(SettingsKey.FailSafeIsOnFlag.value) or 'true'
         self._failsafeCB.setChecked(str(savedFailsafe).lower() == 'true')
@@ -669,13 +774,19 @@ class TCC_GUI(QtWidgets.QWidget):
         self._curveEditor.update()
         self._loadAppSettings()
 
-    def G_Mode_key_Pressed(self, val):
-        print("G_Mode_key " + str(val))
-
 def runApp(startMinimized = False) -> int:
     app = QtWidgets.QApplication([])
     # 关键：关闭/隐藏最后窗口时不要退出程序（保持托盘运行），否则 --minimized 启动后 hide() 会直接退出
     app.setQuitOnLastWindowClosed(False)
+
+    # 风扇控制要写戴尔的 WMI 方法，没有管理员权限就是读得到、控不了
+    if not isElevated():
+        (toRelaunch, _) = confirm(
+            "需要管理员权限",
+            "当前以普通用户权限运行，无法控制风扇（温度保护也会失效）。",
+            ("以管理员身份重启", "仍以普通权限运行"), False)
+        if toRelaunch and relaunchElevated():
+            return 0
 
     # Setup backend
     try:
@@ -683,7 +794,7 @@ def runApp(startMinimized = False) -> int:
     except NoAWCCWMIClass:
         errorExit("系统中未找到 AWCC WMI 类。", "可能未安装相关驱动，或您的机型不受支持。")
     except CannotInstAWCCWMI:
-        errorExit("无法实例化 AWCC WMI 类。", "请确保以管理员身份运行本程序。")
+        errorExit("无法实例化 AWCC WMI 类。", "请以管理员身份运行本程序（右键 → 以管理员身份运行）。")
 
     mainWindow = TCC_GUI(awcc)
     mainWindow.setStyleSheet(f"""
