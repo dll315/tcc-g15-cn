@@ -7,7 +7,7 @@ param([switch]$Debug)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 
-$version = '1.7.1-cn'          # 与 AppGUI.APP_VERSION、installer-cn.iss 保持一致
+$version = '1.7.2-cn'          # 与 AppGUI.APP_VERSION、installer-cn.iss 保持一致
 $icon    = Join-Path $root '源码/icons/gaugeIcon-cn.ico'
 
 # 便携版单文件 exe。路径全部给绝对路径：--specpath 会让 PyInstaller 把 --add-data 的

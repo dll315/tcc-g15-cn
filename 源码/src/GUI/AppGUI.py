@@ -120,6 +120,16 @@ def relaunchElevated() -> bool:
     except Exception:
         return False
 
+def autorunTaskEnabled() -> Optional[bool]:
+    """开机自启当前是否开启。None = 查不到（权限不足或被策略限制），不能当成"未开启"。"""
+    import subprocess
+    try:
+        res = subprocess.run(['schtasks', '/query', '/tn', TASK_NAME],
+                             capture_output=True, text=True, errors='replace')
+    except OSError:
+        return None
+    return res.returncode == 0
+
 def cleanupLegacyRunEntry() -> None:
     """删除 1.7.0-cn 写在 HKCU Run 键里的自启值。
     留着它会与计划任务并存：开机拉起两份程序，或指向一个已被移走的 exe 而每次开机报错。"""
@@ -172,7 +182,7 @@ def autorunTask(action: Literal['add', 'remove']) -> Tuple[int, str]:
         # 删除一个本就不存在的任务，schtasks 也返回非 0，这种"失败"要当成功
         if action == 'remove' and ('找不到' in (res.stderr + res.stdout) or 'cannot find' in (res.stderr + res.stdout).lower()):
             cleanupLegacyRunEntry()
-            return 0, ''
+            return 0, 'absent'
         return res.returncode, (res.stdout + res.stderr).strip()[:400]
     # 只有任务真的处理成功才清旧 Run 值：否则建任务失败 + 旧项被删 = 自启彻底失效
     cleanupLegacyRunEntry()
@@ -267,7 +277,7 @@ class TCC_GUI(QtWidgets.QWidget):
     FAILSAFE_TRIGGER_DELAY_SEC = 8
     FAILSAFE_RESET_AFTER_TEMP_IS_OK_FOR_SEC = 60
     APP_NAME = "G15 温控中心"
-    APP_VERSION = "1.7.1-cn"
+    APP_VERSION = "1.7.2-cn"
     APP_DESCRIPTION = "Alienware Command Center 的开源替代品（中文改造版）"
     APP_URL = "github.com/AlexIII/tcc-g15"
     # 设置存储隔离：必须与原作者不同，否则改造版的 'Auto' 模式会污染原版设置、导致原版崩溃
@@ -370,28 +380,47 @@ class TCC_GUI(QtWidgets.QWidget):
             os.system(f'explorer "{self._tempLogger.logDir}"')
         openLogDirAction.triggered.connect(openLogDir)
 
-        addToAutorunAction = menu.addAction("开机自启")
+        # 用单个可勾选项反映真实状态。原先"开机自启 / 关闭自启"两项恒定显示，既看不出当前
+        # 是开着还是关着，删除失败时还照样弹"已关闭"报成功——用户无从判断，只能反复试。
         AUTORUN_ERRORS = {
-            -100: '源码运行没有可自启的 exe，请用打包后的 exe 再开启',
-            -101: '需要管理员权限才能创建提权自启任务',
-            -102: '无法写入临时目录',
+            -100: '当前是源码运行，没有可自启的 exe，请用打包出的 tcc-g15-cn.exe 再开启',
+            -101: '当前不是管理员权限，无法创建提权自启任务。请先以管理员身份运行本程序',
+            -102: '无法写入临时任务文件',
             -103: '找不到 schtasks 命令',
-            1: '任务计划程序拒绝了创建请求，详见下方原文',
         }
-        def autorunTaskRun(action: Literal['add', 'remove']) -> None:
-            err, detail = autorunTask(action)
-            if err != 0 and action == 'add':
-                alert("开机自启未开启", AUTORUN_ERRORS.get(err, detail or f'错误码 {err}'),
+        self._autorunAction = menu.addAction("开机自启（登录后以管理员身份静默启动）")
+        self._autorunAction.setCheckable(True)
+
+        def refreshAutorunState() -> None:
+            state = autorunTaskEnabled()
+            self._autorunAction.setChecked(state is True)
+            self._autorunAction.setToolTip(
+                {True: '已开启', False: '未开启',
+                 None: '权限不足，查不到任务计划的状态'}[state])
+        refreshAutorunState()
+
+        def onAutorunTriggered(checked: bool) -> None:
+            err, detail = autorunTask('add' if checked else 'remove')
+            if err != 0:
+                msg = AUTORUN_ERRORS.get(err, '')
+                if detail:
+                    msg = (msg + '\n\nschtasks 返回：\n' + detail) if msg else detail
+                alert("开机自启设置失败", msg or f'错误码 {err}',
                       QtWidgets.QMessageBox.Icon.Critical)
+            elif detail == 'absent':
+                alert("提示", "本机本来就没有开启开机自启。")
             else:
-                alert("成功", f"开机自启已{'开启' if action == 'add' else '关闭'}")
+                alert("成功", "开机自启已" + ('开启' if checked else '关闭'))
             # When in minimized state, a wired bug causes the app to close if we won't touch some of the `self.show*()` methods
             if self.isMinimized():
                 self.showMinimized()
                 self.hide()
-        addToAutorunAction.triggered.connect(lambda: autorunTaskRun('add'))
-        removeFromAutorunAction = menu.addAction("关闭自启")
-        removeFromAutorunAction.triggered.connect(lambda: autorunTaskRun('remove'))
+            refreshAutorunState()
+
+        # 接 triggered 而不是 toggled：失败后 refreshAutorunState 里的 setChecked 会再触发
+        # 一次 toggled，那时 checked 已是 False，会走到 remove 把刚建好的任务又删掉。
+        self._autorunAction.triggered.connect(onAutorunTriggered)
+        menu.aboutToShow.connect(refreshAutorunState)
         restoreAction = menu.addAction("恢复默认设置")
         restoreAction.triggered.connect(self.clearAppSettings)
         exitAction = menu.addAction("退出")
@@ -631,7 +660,7 @@ class TCC_GUI(QtWidgets.QWidget):
             if (self._failsafeOn and
                 self._modeSwitch.getChecked() != ThermalMode.G_Mode.value and
                 tempIsHigh and
-                time.time() - self._failsafeTempIsHighStartTs > self.FAILSAFE_TRIGGER_DELAY_SEC
+                time.time() - self._failsafeTempIsHighStartTs >= self.FAILSAFE_TRIGGER_DELAY_SEC
             ):
                 self._failsafeTrippedPrevModeStr = self._modeSwitch.getChecked()
                 self._modeSwitch.setChecked(ThermalMode.G_Mode.value)
@@ -640,7 +669,7 @@ class TCC_GUI(QtWidgets.QWidget):
 
             # Auto-reset failsafe
             if (self._failsafeTrippedPrevModeStr is not None and
-                time.time() - self._failsafeTempIsHighTs > self.FAILSAFE_RESET_AFTER_TEMP_IS_OK_FOR_SEC
+                time.time() - self._failsafeTempIsHighTs >= self.FAILSAFE_RESET_AFTER_TEMP_IS_OK_FOR_SEC
             ):
                 self._modeSwitch.setChecked(self._failsafeTrippedPrevModeStr)
                 self._toasterMessageCurrentMode(source='failsafe')
@@ -778,6 +807,17 @@ class TCC_GUI(QtWidgets.QWidget):
         self.settings.setValue(SettingsKey.FailSafeIsOnFlag.value, self._failsafeOn)
         self.settings.setValue(SettingsKey.LogEnabledFlag.value, self._tempLogger.enabled)
 
+    def _readIntSetting(self, key: str, default: Optional[int] = None) -> Optional[int]:
+        """读一个数值设置。
+
+        QSettings 跨进程读回来的一律是字符串（"60" 而不是 60，实测），直接拿去和 int
+        比较会抛 TypeError —— 而这段跑在构造函数里，等于第二次启动就打不开程序。
+        """
+        try:
+            return int(str(self.settings.value(key)).strip())
+        except (TypeError, ValueError):
+            return default
+
     def _loadAppSettings(self):
         savedMode = self.settings.value(SettingsKey.Mode.value) or ThermalMode.Balanced.value
         # 合法性校验：若读到未知模式（如旧版本残留脏数据），回退到 Balanced，防止 setChecked 崩溃
@@ -785,16 +825,17 @@ class TCC_GUI(QtWidgets.QWidget):
         if savedMode not in validModes:
             savedMode = ThermalMode.Balanced.value
         self._modeSwitch.setChecked(savedMode)
-        savedSpeed = self.settings.value(SettingsKey.CPUFanSpeed.value)
-        self._thermalCPU.setSpeedSlider(savedSpeed)
-        savedSpeed = self.settings.value(SettingsKey.GPUFanSpeed.value)
-        self._thermalGPU.setSpeedSlider(savedSpeed)
-        savedTemp = self.settings.value(SettingsKey.CPUThresholdTemp.value) or self.__class__.DEFAULT_FAILSAFE_CPU_TEMP
-        self._limitTempCPU.setCurrentText(str(savedTemp))
-        savedTemp = self.settings.value(SettingsKey.GPUThresholdTemp.value) or self.__class__.DEFAULT_FAILSAFE_GPU_TEMP
-        self._limitTempGPU.setCurrentText(str(savedTemp))
-        savedFailsafe = self.settings.value(SettingsKey.FailSafeIsOnFlag.value) or 'true'
-        self._failsafeCB.setChecked(str(savedFailsafe).lower() == 'true')
+        self._thermalCPU.setSpeedSlider(self._readIntSetting(SettingsKey.CPUFanSpeed.value))
+        self._thermalGPU.setSpeedSlider(self._readIntSetting(SettingsKey.GPUFanSpeed.value))
+        self._limitTempCPU.setCurrentText(str(self._readIntSetting(
+            SettingsKey.CPUThresholdTemp.value, self.__class__.DEFAULT_FAILSAFE_CPU_TEMP)))
+        self._limitTempGPU.setCurrentText(str(self._readIntSetting(
+            SettingsKey.GPUThresholdTemp.value, self.__class__.DEFAULT_FAILSAFE_GPU_TEMP)))
+        # 不能用 `or 'true'`：存进去的 False 读回来是假值，会被当成"没存过"，
+        # 于是用户关掉温度保护后每次启动又自动打开
+        savedFailsafe = self.settings.value(SettingsKey.FailSafeIsOnFlag.value)
+        self._failsafeCB.setChecked(True if savedFailsafe is None
+                                   else str(savedFailsafe).lower() == 'true')
 
     def clearAppSettings(self):
         (isYes, _) = confirm("恢复默认设置", "确定要将所有设置（含风扇曲线）恢复为默认值吗？", ("恢复默认", "取消"))

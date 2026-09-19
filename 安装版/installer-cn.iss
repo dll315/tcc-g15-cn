@@ -3,7 +3,7 @@
 ; 路径全部相对于本脚本所在目录（Inno 默认行为），换机器换盘符也能构建
 
 #define MyAppName "TCC G15 中文版"
-#define MyAppVersion "1.7.1-cn"
+#define MyAppVersion "1.7.2-cn"
 #define MyAppPublisher "dll315"
 #define MyAppURL "https://github.com/dll315/tcc-g15-cn"
 #define MyAppExeName "tcc-g15-cn.exe"
