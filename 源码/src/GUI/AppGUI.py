@@ -58,6 +58,15 @@ LEGACY_RUN_VALUE = "TCC_G15"     # 1.7.0-cn 用 Run 键做自启时留下的值
 # HKCU\...\Run 键天生无法提权，所以用计划任务：InteractiveToken + HighestAvailable
 # 在登录时以管理员身份启动且不弹 UAC。XML 作为常量内嵌、运行时写 %TEMP%，
 # 不再依赖打包目录里的外部文件（_MEIPASS 只读，改写在打包后必然失败）。
+#
+# XML 关键细节（都是「开机不自启」的实测坑，上游 issue #7 同款）：
+# - <Delay>PT15S</Delay>：登录后延迟 15 秒再启动，避开系统服务启动高峰。
+#   登录瞬间 Dell 的 WMI provider 往往还没注册好 AWCCWmiMethodFunction，
+#   立刻拉起程序几乎必撞「找不到 AWCC WMI 类」。
+# - <Command> 不带引号：Task Scheduler 规范里 Command 是纯路径（参数走 Arguments），
+#   带引号在部分环境会被当成路径的一部分导致 0x80070002（找不到文件）。
+# - <WorkingDirectory>：任务计划程序默认工作目录是 C:\Windows\System32，
+#   显式指定 exe 所在目录，防止任何相对路径行为悄悄退化。
 TASK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -68,6 +77,7 @@ TASK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
     <LogonTrigger>
       <Enabled>true</Enabled>
       <StartBoundary>2026-01-01T00:00:00</StartBoundary>
+      <Delay>PT15S</Delay>
     </LogonTrigger>
   </Triggers>
   <Principals>
@@ -93,8 +103,9 @@ TASK_XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-16"?>
   </Settings>
   <Actions Context="Author">
     <Exec>
-      <Command>"{exe}"</Command>
+      <Command>{exe}</Command>
       <Arguments>--minimized</Arguments>
+      <WorkingDirectory>{workdir}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>
@@ -147,6 +158,20 @@ def cleanupLegacyRunEntry() -> None:
     finally:
         winreg.CloseKey(key)
 
+# 上游 AlexIII/tcc-g15 的开机自启任务名。两个程序同时自启会互相抢占
+# AWCC 风扇接口和 F13 热键，开启本程序自启时检测它并提醒（只提醒，不动别人的任务）。
+ORIGINAL_TASK_NAME = "TCC_G15"
+
+def originalAutorunTaskExists() -> bool:
+    """上游原版的自启任务是否存在。存在≠冲突已发生，但值得提醒用户二选一。"""
+    import subprocess
+    try:
+        res = subprocess.run(['schtasks', '/query', '/tn', ORIGINAL_TASK_NAME],
+                             capture_output=True, text=True, errors='replace')
+    except OSError:
+        return False
+    return res.returncode == 0
+
 def autorunTask(action: Literal['add', 'remove']) -> Tuple[int, str]:
     """开机自启：创建/删除提权计划任务。返回 (0, '') 表示成功。
 
@@ -161,7 +186,12 @@ def autorunTask(action: Literal['add', 'remove']) -> Tuple[int, str]:
             return -100, '当前是源码运行，没有可自启的 exe，请用打包出的 tcc-g15-cn.exe 再开启'
         if not isElevated():
             return -101, '当前不是管理员权限，无法创建提权自启任务。请先右键程序「以管理员身份运行」再开启'
-        xml = TASK_XML_TEMPLATE.format(task_name=TASK_NAME, exe=os.path.normpath(exeFile))
+        from xml.sax.saxutils import escape as xmlEscape   # 路径含 & < > 时保证 XML 合法
+        exeNorm = os.path.normpath(exeFile)
+        xml = TASK_XML_TEMPLATE.format(
+            task_name=TASK_NAME,
+            exe=xmlEscape(exeNorm),
+            workdir=xmlEscape(os.path.dirname(exeNorm)))
         xmlPath = os.path.join(tempfile.gettempdir(), 'tcc_g15_cn_task.xml')
         try:
             with open(xmlPath, 'w', encoding='utf-16') as f:   # schtasks 要求声明与实际编码一致
@@ -186,6 +216,10 @@ def autorunTask(action: Literal['add', 'remove']) -> Tuple[int, str]:
         return res.returncode, (res.stdout + res.stderr).strip()[:400]
     # 只有任务真的处理成功才清旧 Run 值：否则建任务失败 + 旧项被删 = 自启彻底失效
     cleanupLegacyRunEntry()
+    # 建完立刻回查验证：schtasks 偶尔返回 0 但任务实际没落盘（组策略/损坏的任务文件夹），
+    # 不验证的话 UI 显示已开启、重启后却不会自启，排查起来毫无头绪
+    if action == 'add' and autorunTaskEnabled() is not True:
+        return -104, 'schtasks 报告创建成功，但回查不到任务（可能被组策略拦截或任务文件夹损坏）'
     return 0, ''
 
 def alert(title: str, message: str, type: QtWidgets.QMessageBox.Icon = QtWidgets.QMessageBox.Icon.Information, *, message2: Optional[str] = None) -> None:
@@ -262,6 +296,35 @@ class SettingsKey(Enum):
     GpuCurve = "app/curve/gpu"
     CpuCurve = "app/curve/cpu"
 
+# 开机自启时 Dell 的 WMI provider 常在登录后几秒~几十秒才注册完
+# AWCCWmiMethodFunction，一上来就初始化几乎必失败——这正是「开机不自启还报错」
+# 的根因（上游 AlexIII/tcc-g15 issue #7 的 "won't start on a reboot" 同款）。
+AWCC_INIT_RETRY_INTERVAL_SEC = 3
+AWCC_INIT_RETRY_WINDOW_SEC = 60
+
+def initAwccWithRetry(app: QtWidgets.QApplication) -> AWCCThermal:
+    """初始化 AWCC WMI 接口，失败按固定间隔重试，直到超过 AWCC_INIT_RETRY_WINDOW_SEC。
+
+    自启（--minimized）和手动启动走同一条路径：手动启动撞上 WMI 未就绪时
+    多等几秒也比直接弹错误框体验好。重试期间 processEvents 保持 UI 线程活着；
+    超时后把最后一次异常抛给调用方统一报错。
+    """
+    attempts = max(1, AWCC_INIT_RETRY_WINDOW_SEC // AWCC_INIT_RETRY_INTERVAL_SEC)
+    lastErr: Optional[Exception] = None
+    for i in range(attempts):
+        try:
+            return AWCCThermal()
+        except (NoAWCCWMIClass, CannotInstAWCCWMI) as ex:
+            lastErr = ex
+            if i < attempts - 1:
+                print(f'AWCC init attempt {i + 1}/{attempts} failed, retrying in {AWCC_INIT_RETRY_INTERVAL_SEC}s...')
+                deadline = time.monotonic() + AWCC_INIT_RETRY_INTERVAL_SEC
+                while time.monotonic() < deadline:
+                    app.processEvents()
+                    time.sleep(0.1)
+    assert lastErr is not None
+    raise lastErr
+
 def errorExit(message: str, message2: Optional[str] = None) -> None:
     if not QtWidgets.QApplication.instance():
          QtWidgets.QApplication([])
@@ -277,7 +340,7 @@ class TCC_GUI(QtWidgets.QWidget):
     FAILSAFE_TRIGGER_DELAY_SEC = 8
     FAILSAFE_RESET_AFTER_TEMP_IS_OK_FOR_SEC = 60
     APP_NAME = "G15 温控中心"
-    APP_VERSION = "1.7.2-cn"
+    APP_VERSION = "1.7.3-cn"
     APP_DESCRIPTION = "Alienware Command Center 的开源替代品（中文改造版）"
     APP_URL = "github.com/AlexIII/tcc-g15"
     # 设置存储隔离：必须与原作者不同，否则改造版的 'Auto' 模式会污染原版设置、导致原版崩溃
@@ -301,7 +364,9 @@ class TCC_GUI(QtWidgets.QWidget):
 
     _showHideKeySignal = QtCore.Signal()
 
-    _toaster = WindowsToaster(APP_NAME)
+    # 懒加载：不在 import（类定义）时实例化。开机自启的早期阶段通知子系统
+    # 可能还没就绪，winrt 初始化一旦抛异常会拖垮整个程序启动
+    _toaster: Optional[WindowsToaster] = None
 
     _modeSwitch: QRadioButtonSet
 
@@ -411,6 +476,11 @@ class TCC_GUI(QtWidgets.QWidget):
                 alert("提示", "本机本来就没有开启开机自启。")
             else:
                 alert("成功", "开机自启已" + ('开启' if checked else '关闭'))
+                if checked and originalAutorunTaskExists():
+                    alert("检测到原版自启",
+                          "检测到上游原版 TCC-G15 的开机自启任务（TCC_G15）仍然存在。\n"
+                          "两个程序同时自启会互相抢占风扇控制权、F13 热键也只有一方能生效。\n"
+                          "建议到原版程序的托盘菜单里关闭它的开机自启，或直接卸载原版。")
             # When in minimized state, a wired bug causes the app to close if we won't touch some of the `self.show*()` methods
             if self.isMinimized():
                 self.showMinimized()
@@ -779,11 +849,28 @@ class TCC_GUI(QtWidgets.QWidget):
             source != 'failsafe'
         )
 
+    def _getToaster(self) -> Optional[WindowsToaster]:
+        if TCC_GUI._toaster is None:
+            try:
+                TCC_GUI._toaster = WindowsToaster(self.APP_NAME)
+            except Exception as ex:
+                print(f'WindowsToaster init failed: {ex}')
+                return None
+        return TCC_GUI._toaster
+
     def toasterMessage(self, message: List[str | None], expire = True) -> None:
-        toast = Toast(duration=ToastDuration.Short, expiration_time= (datetime.datetime.now() + datetime.timedelta(seconds=5)) if expire else None)
-        toast.text_fields = message
-        toast.AddImage(ToastDisplayImage.fromPath(resourcePath(GUI_ICON)))
-        self._toaster.show_toast(toast)
+        # 通知只是锦上添花：通知子系统不可用（开机早期/专注助手/组策略禁用）时
+        # 静默跳过，绝不能让风扇控制主流程被一个 toast 拖崩
+        try:
+            toaster = self._getToaster()
+            if toaster is None:
+                return
+            toast = Toast(duration=ToastDuration.Short, expiration_time= (datetime.datetime.now() + datetime.timedelta(seconds=5)) if expire else None)
+            toast.text_fields = message
+            toast.AddImage(ToastDisplayImage.fromPath(resourcePath(GUI_ICON)))
+            toaster.show_toast(toast)
+        except Exception as ex:
+            print(f'toast failed: {ex}')
 
     def _saveAppSettings(self):
         curValues = [
@@ -860,13 +947,16 @@ def runApp(startMinimized = False) -> int:
         if toRelaunch and relaunchElevated():
             return 0
 
-    # Setup backend
+    # Setup backend（开机自启时 Dell WMI 组件常未就绪，必须重试而不是直接弹窗退出）
     try:
-        awcc = AWCCThermal()
+        awcc = initAwccWithRetry(app)
     except NoAWCCWMIClass:
-        errorExit("系统中未找到 AWCC WMI 类。", "可能未安装相关驱动，或您的机型不受支持。")
+        errorExit(f"等待 {AWCC_INIT_RETRY_WINDOW_SEC} 秒后仍未找到 AWCC WMI 类。",
+                  "可能未安装 AWCC 驱动组件，或您的机型不受支持。"
+                  + ("\n（本次为开机自启启动：Dell 后台服务可能启动异常，重装官方 AWCC 组件通常能恢复）" if startMinimized else ""))
     except CannotInstAWCCWMI:
-        errorExit("无法实例化 AWCC WMI 类。", "请以管理员身份运行本程序（右键 → 以管理员身份运行）。")
+        errorExit(f"AWCC WMI 类实例化持续失败（已重试 {AWCC_INIT_RETRY_WINDOW_SEC} 秒）。",
+                  "请以管理员身份运行本程序；若已是管理员仍失败，可能是 AWCC 组件异常，建议重装官方 AWCC 后重试。")
 
     mainWindow = TCC_GUI(awcc)
     mainWindow.setStyleSheet(f"""
