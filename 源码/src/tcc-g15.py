@@ -1,7 +1,17 @@
 # (c) github.com/AlexIII
 # GPLv3
 
-import sys
+import sys, os
+
+# PyInstaller --windowed 构建下 sys.stdout/stderr 是 None。
+# 内置 print() 对此静默不崩（CPython 对 None 是 no-op），但第三方库
+# （wmi/windows_toasts 等）一旦直接 sys.stdout.write(...) 就会 AttributeError
+# 拖垮整个启动。统一重定向到 devnull，杜绝这一整类崩溃。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+
 from GUI.AppGUI import runApp, errorExit
 # from pyuac import main_requires_admin
 
