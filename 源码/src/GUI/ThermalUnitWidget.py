@@ -29,6 +29,24 @@ class ThermalUnitWidget(QtWidgets.QWidget):
         self._speedSliderDebounce.setSingleShot(True)
         self._speedSliderDebounce.timeout.connect(self._onSpeedSliderChange)
         self._speedSlider.valueChanged.connect(lambda: self._speedSliderDebounce.start())
+
+        # 智控模式的目标温度：拖它就是在告诉 PID「把温度稳在这儿」。
+        # 风扇转速由算法自己算，所以这条滑条和上面那条是互斥的两套控制方式。
+        self._targetSlider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal, self)
+        self._targetSlider.setMinimum(55)
+        self._targetSlider.setMaximum(90)
+        self._targetSlider.setTickInterval(5)
+        self._targetSlider.setTickPosition(QtWidgets.QSlider.TicksBelow)
+        self._targetSlider.setValue(73)
+        self._targetSlider.setToolTip('智控模式下希望稳定到的温度')
+        self._targetLabel = QtWidgets.QLabel('目标温度 73 °C')
+        self._targetCallback = None
+        self._targetSyncing = False
+        self._targetDebounce = QtCore.QTimer()
+        self._targetDebounce.setInterval(300)
+        self._targetDebounce.setSingleShot(True)
+        self._targetDebounce.timeout.connect(self._onTargetChange)
+        self._targetSlider.valueChanged.connect(self._onTargetSliderMove)
         
         grid = QtWidgets.QGridLayout() # type: QtWidgets.QWidget
         grid.addWidget(self._title,         0, 0, QtCore.Qt.AlignCenter)
@@ -39,6 +57,8 @@ class ThermalUnitWidget(QtWidgets.QWidget):
         grid.addWidget(_fanBarLabel,        3, 1, QtCore.Qt.AlignLeft)
         grid.addWidget(self._speedSlider,   4, 0, QtCore.Qt.AlignTop)
         grid.addWidget(_speedSliderLabel,   4, 1, QtCore.Qt.AlignLeft)
+        grid.addWidget(self._targetSlider,  5, 0, QtCore.Qt.AlignTop)
+        grid.addWidget(self._targetLabel,   5, 1, QtCore.Qt.AlignLeft)
         grid.setColumnStretch(0, 1)
         grid.setColumnStretch(1, 0)
         self.setLayout(grid)
@@ -86,6 +106,37 @@ class ThermalUnitWidget(QtWidgets.QWidget):
         if value < self._speedSlider.minimum(): value = self._speedSlider.minimum()
         if value > self._speedSlider.maximum(): value = self._speedSlider.maximum()
         self._speedSlider.setValue(value)
+
+    def targetTempChanged(self, callback: Callable) -> None:
+        self._targetCallback = callback
+
+    def getTargetTemp(self) -> int:
+        return self._targetSlider.value()
+
+    def setTargetTemp(self, value: Optional[int] = None) -> None:
+        if value is None:
+            return
+        v = max(self._targetSlider.minimum(),
+                min(self._targetSlider.maximum(), int(round(value))))
+        self._targetSyncing = True
+        self._targetSlider.setValue(v)
+        self._targetSyncing = False
+        self._targetLabel.setText(f'目标温度 {v} °C')
+
+    def setTargetDisabled(self, disabled: bool) -> None:
+        self._targetSlider.setDisabled(disabled)
+        self._targetLabel.setDisabled(disabled)
+
+    @QtCore.Slot()
+    def _onTargetSliderMove(self) -> None:
+        self._targetLabel.setText(f'目标温度 {self._targetSlider.value()} °C')
+        if not self._targetSyncing:
+            self._targetDebounce.start()
+
+    @QtCore.Slot()
+    def _onTargetChange(self) -> None:
+        if self._targetCallback:
+            self._targetCallback()
 
     @QtCore.Slot()
     def _onSpeedSliderChange(self) -> None:

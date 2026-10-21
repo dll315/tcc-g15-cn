@@ -8,6 +8,8 @@ from Backend.AWCCWmiWrapper import AWCCWmiWrapper
 from Backend.TempLogger import TempLogger
 from Backend.FanCurve import FanCurve
 from GUI.QRadioButtonSet import QRadioButtonSet
+from Backend.PidController import PidController
+from pathlib import Path
 from GUI.AppColors import Colors
 from GUI.ThermalUnitWidget import ThermalUnitWidget
 from GUI.QGaugeTrayIcon import QGaugeTrayIcon
@@ -264,6 +266,7 @@ class ThermalMode(Enum):
     G_Mode = 'G_Mode'
     Custom = 'Custom'
     Auto = 'Auto'  # 自动曲线模式：底层使用 Custom 档，风速由曲线决定
+    Pid = 'Pid'    # 智控模式：PID 闭环，看温度也看升温速度，同样借 Custom 档
 
 # 模式中文名（仅显示用，存储值不变）
 MODE_DISPLAY = {
@@ -271,6 +274,7 @@ MODE_DISPLAY = {
     ThermalMode.G_Mode.value: "性能模式",
     ThermalMode.Custom.value: "自定义",
     ThermalMode.Auto.value: "自动曲线",
+    ThermalMode.Pid.value: "智控 PID",
 }
 def modeDisplayName(modeValue: str) -> str:
     return MODE_DISPLAY.get(modeValue, modeValue)
@@ -282,7 +286,49 @@ UI_MODE_TO_BACKEND = {
     ThermalMode.G_Mode.value:   AWCCWmiWrapper.ThermalMode.G_Mode,
     ThermalMode.Custom.value:   AWCCWmiWrapper.ThermalMode.Custom,
     ThermalMode.Auto.value:     AWCCWmiWrapper.ThermalMode.Custom,   # 自动曲线借用手动档
+    ThermalMode.Pid.value:      AWCCWmiWrapper.ThermalMode.Custom,   # 智控同样借手动档
 }
+
+# 智控模式的参数。放 AppData 下的独立文件，不进 QSettings——
+# 想让用户能直接手改调参，不想埋在注册表里。
+PID_CONFIG_PATH = Path(os.path.expandvars(r"%LOCALAPPDATA%\TCC-G15-CN\pid.json"))
+PID_CONFIG_DEFAULT = {
+    "targetCpu": 73.0,
+    "targetGpu": 60.0,
+    "kp": 9.0,
+    "ki": 0.6,
+    "kd": 10.0,
+    "base": 15.0,
+    "maxStep": 30.0,
+    # GPU 那一路单独一组增益：GPU 满载温度顶在下不来，共用大 kp 会在饱和区反复横跳
+    "gpuKp": 5.0,
+    "gpuKi": 0.5,
+    "gpuKd": 12.0,
+    # 死区：误差小于这个值就不动输出，避免在目标线附近一秒一改
+    "deadband": 0.6,
+}
+
+def savePidConfig(cfg: dict) -> None:
+    try:
+        import json
+        PID_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PID_CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception as ex:
+        print(f'pid.json 写回失败：{ex}')
+
+def loadPidConfig() -> dict:
+    cfg = dict(PID_CONFIG_DEFAULT)
+    try:
+        if PID_CONFIG_PATH.exists():
+            import json
+            user = json.loads(PID_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+            for k, v in user.items():
+                if k in cfg:
+                    cfg[k] = float(v)
+    except Exception as ex:
+        print(f"pid.json 读取失败，用默认值：{ex}")
+    return cfg
+
 
 class SettingsKey(Enum):
     Mode = "app/mode"
@@ -511,10 +557,27 @@ class TCC_GUI(QtWidgets.QWidget):
         self.setObjectName('QMainWindow')
         self.setWindowTitle(f"{self.APP_NAME} v{self.APP_VERSION}")
 
-        self._thermalGPU = ThermalUnitWidget(self, tempMinMax= (0, 95), tempColorLimits= self.GPU_COLOR_LIMITS, fanMinMax= (0, 5500), sliderMaxAndTick= (120, 20))
+        self._thermalGPU = ThermalUnitWidget(self, tempMinMax= (0, 95), tempColorLimits= self.GPU_COLOR_LIMITS, fanMinMax= (0, 5700), sliderMaxAndTick= (100, 20))
         self._thermalGPU.setTitle('GPU 显卡')
-        self._thermalCPU = ThermalUnitWidget(self, tempMinMax= (0, 110), tempColorLimits= self.CPU_COLOR_LIMITS, fanMinMax= (0, 5500), sliderMaxAndTick= (120, 20))
+        self._thermalCPU = ThermalUnitWidget(self, tempMinMax= (0, 110), tempColorLimits= self.CPU_COLOR_LIMITS, fanMinMax= (0, 5900), sliderMaxAndTick= (100, 20))
         self._thermalCPU.setTitle('CPU 处理器')
+
+        # 目标温度滑条 -> PID 目标。等 PID 实例建好后才真正生效（_pidReady）。
+        self._pidReady = False
+        def onTargetTempChange():
+            if not self._pidReady:
+                return
+            cpuT = float(self._thermalCPU.getTargetTemp())
+            gpuT = float(self._thermalGPU.getTargetTemp())
+            self._pidCpu.target = cpuT
+            self._pidGpu.target = gpuT
+            cfg = loadPidConfig()
+            cfg['targetCpu'] = cpuT
+            cfg['targetGpu'] = gpuT
+            savePidConfig(cfg)
+            print(f'PID 目标温度：CPU {cpuT}°C / GPU {gpuT}°C')
+        self._thermalCPU.targetTempChanged(onTargetTempChange)
+        self._thermalGPU.targetTempChanged(onTargetTempChange)
 
         # Detecting GPU/CPU model is a slow operation, run asynchronously
         class DetectCpuGpuModelsWorker(QtCore.QObject):
@@ -629,6 +692,9 @@ class TCC_GUI(QtWidgets.QWidget):
         # Glue GUI to backend
         self.gModeHotKey = None
         self._updateGaugesTask = None
+        # 切档后 EC 会有一段时间不报转速（实测 10 秒以上返回 0）。
+        # 这段时间内把 0 当"无读数"处理，界面留住上一次的有效值。
+        self._rpmHoldUntil = 0.0
 
         def setFanSpeed(fan: Literal['GPU', 'CPU'], speed: int) -> None:
             res = self._awcc.setFanSpeed(self._awcc.GPUFanIdx if fan == 'GPU' else self._awcc.CPUFanIdx, speed)
@@ -647,6 +713,43 @@ class TCC_GUI(QtWidgets.QWidget):
                     self._lastAutoFanSpeed[fan] = speed
                     setFanSpeed(fan, speed)
 
+        # ---- 智控 PID ----
+        _pidCfg = loadPidConfig()
+        self._pidCpu = PidController(_pidCfg["targetCpu"], _pidCfg["kp"], _pidCfg["ki"],
+                                     _pidCfg["kd"], base=_pidCfg["base"],
+                                     maxStep=_pidCfg["maxStep"],
+                                     deadband=_pidCfg.get("deadband", 0.0))
+        self._pidGpu = PidController(_pidCfg["targetGpu"],
+                                     _pidCfg.get("gpuKp", _pidCfg["kp"]),
+                                     _pidCfg.get("gpuKi", _pidCfg["ki"]),
+                                     _pidCfg.get("gpuKd", _pidCfg["kd"]),
+                                     base=_pidCfg["base"],
+                                     maxStep=_pidCfg["maxStep"],
+                                     deadband=_pidCfg.get("deadband", 0.0))
+        self._pidLastTs = None
+        self._thermalCPU.setTargetTemp(_pidCfg["targetCpu"])
+        self._thermalGPU.setTargetTemp(_pidCfg["targetGpu"])
+        self._pidReady = True
+
+        def applyPidFan(gpuTemp=None, cpuTemp=None) -> None:
+            """智控模式：PID 按温度和升温速度算风扇百分比。"""
+            if self._modeSwitch.getChecked() != ThermalMode.Pid.value:
+                return
+            if gpuTemp is None: gpuTemp = self._thermalGPU.getTemp()
+            if cpuTemp is None: cpuTemp = self._thermalCPU.getTemp()
+
+            now = time.time()
+            dt = 1.0 if self._pidLastTs is None else max(0.2, min(5.0, now - self._pidLastTs))
+            self._pidLastTs = now
+
+            for fan, temp, pid in (('GPU', gpuTemp, self._pidGpu), ('CPU', cpuTemp, self._pidCpu)):
+                if temp is None:
+                    continue
+                speed = pid.update(temp, dt)
+                if speed != self._lastAutoFanSpeed.get(fan):
+                    self._lastAutoFanSpeed[fan] = speed
+                    setFanSpeed(fan, speed)
+
         def updateFanSpeed():
             if self._modeSwitch.getChecked() != ThermalMode.Custom.value:
                 return
@@ -657,9 +760,17 @@ class TCC_GUI(QtWidgets.QWidget):
 
         def onModeChange(val: str):
             isAuto = val == ThermalMode.Auto.value
+            isPid = val == ThermalMode.Pid.value
+            self._rpmHoldUntil = time.time() + 15.0
+            self._pidLastTs = None
+            self._pidCpu.reset()
+            self._pidGpu.reset()
             self._thermalGPU.setSpeedDisabled(val != ThermalMode.Custom.value)
             self._thermalCPU.setSpeedDisabled(val != ThermalMode.Custom.value)
-            self._curveEditor.setEnabled(isAuto)
+            # 目标温度滑条只在智控模式有意义
+            self._thermalGPU.setTargetDisabled(not isPid)
+            self._thermalCPU.setTargetDisabled(not isPid)
+            self._curveEditor.setEnabled(isAuto or isPid)
             self._lastAutoFanSpeed.clear()        # 换档后让曲线重新压一遍目标转速
             res = self._awcc.setMode(UI_MODE_TO_BACKEND[val])   # Auto 借 Custom 档，风速由程序按曲线给
             print(f'Set mode {val}: ' + ('ok' if res else 'fail'))
@@ -690,6 +801,10 @@ class TCC_GUI(QtWidgets.QWidget):
             gpuRPM = self._awcc.getFanRPM(self._awcc.GPUFanIdx)
             cpuTemp = self._awcc.getFanRelatedTemp(self._awcc.CPUFanIdx)
             cpuRPM = self._awcc.getFanRPM(self._awcc.CPUFanIdx)
+            # 切档窗口内，0 转是 EC 还没开始上报，不是真的停转：当无读数处理
+            if time.time() < self._rpmHoldUntil:
+                if gpuRPM == 0: gpuRPM = None
+                if cpuRPM == 0: cpuRPM = None
             # 原始读数（可能是 None）。仪表盘显示的是上一次的旧值，提示文案要用原始值
             self._lastSensorTemps = (gpuTemp, cpuTemp)
             # 上一次切档失败的话先重试，成功了才做别的
@@ -708,6 +823,9 @@ class TCC_GUI(QtWidgets.QWidget):
             # 自动曲线模式：按温度查曲线自动调风扇
             if self._modeSwitch.getChecked() == ThermalMode.Auto.value:
                 applyAutoFanCurve(gpuTemp, cpuTemp)
+            # 智控模式：PID 闭环，看温度也看升温速度
+            elif self._modeSwitch.getChecked() == ThermalMode.Pid.value:
+                applyPidFan(gpuTemp, cpuTemp)
             # 曲线编辑器实时温度游标
             self._curveEditor.setCurrentTemps(gpuTemp, cpuTemp)
             # Write CSV log
