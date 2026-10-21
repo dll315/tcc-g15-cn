@@ -82,7 +82,10 @@ class AWCCWmiWrapper:
 
     def SetAddonSpeedPercent(self, fanId: int, speed: int) -> bool:
         if not (fanId in range(self.FAN_ID_FIRST, self.FAN_ID_LAST + 1)): return False
-        if speed > 0xFF: speed = 0xFF
+        # UI 传的是 0-100 的百分比，而硬件这一个字段收的是 0-255。
+        # 不换算的话「100%」实际只有 255 里的 100，也就是 39%——风扇永远拉不满。
+        # 实测：直接传 100 -> 约 3400-4200 转；传 255 -> 约 5900 转。
+        speed = round(max(0, min(100, speed)) * 255 / 100)
         arg = ((speed & 0xFF) << 16) | ((fanId & 0xFF) << 8) | 2
         return self._call('Thermal_Control', arg) == 0
 
